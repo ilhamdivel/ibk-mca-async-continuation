@@ -79,6 +79,12 @@ public class MCAWorkPreProcess {
       return;
     }
 
+    exchange.setProperty("MCA_BID_OWNER", bidInfo);
+    io.netty.channel.ChannelHandlerContext inboundContext = exchange.getIn().getHeader(
+        "CamelNettyChannelHandlerContext", io.netty.channel.ChannelHandlerContext.class);
+    if (inboundContext != null) {
+      exchange.setProperty("MCA_BID_ORIGINAL_CHANNEL", inboundContext.channel());
+    }
     exchange.addOnCompletion(new SynchronizationAdapter() {
       @Override
       public void onDone(Exchange done) {

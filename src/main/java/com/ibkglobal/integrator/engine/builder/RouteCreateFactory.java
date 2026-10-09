@@ -16,6 +16,9 @@ import com.ibkglobal.integrator.engine.builder.route.mca.bid.MCABidProcess;
 @Component
 public class RouteCreateFactory {
 
+  @org.springframework.beans.factory.annotation.Autowired
+  private com.ibkglobal.integrator.engine.bean.mca.work.MCAWorkAfterAsync mcaWorkAfterAsync;
+
   public RouteCreate getCreate(RouteCreateInfo builderInfo) {
 
     // MCA
@@ -24,7 +27,7 @@ public class RouteCreateFactory {
     } else if (builderInfo.getRouteType() == RouteType.MCA_DEFAULT_ADAPTER_OUT) {
       return new MCADefaultAdapterOut(builderInfo);
     } else if (builderInfo.getRouteType() == RouteType.MCA_INBOUND) {
-      return new MCAInbound(builderInfo);
+      return new MCAInbound(builderInfo, mcaWorkAfterAsync);
     } else if (builderInfo.getRouteType() == RouteType.MCA_BID_PROCESS) {
       return new MCABidProcess(builderInfo);
     } else if (builderInfo.getRouteType() == RouteType.MCA_HEALTH_CHECK) {

@@ -145,6 +145,23 @@ public class BidManager {
    * exact BidInfo the timer was armed for, and only while it is still WAIT.
    */
   public void bidTimeout(String key, BidInfo expected) {
+    if (expected.getAsyncCallback() != null) {
+      if (expected.getContinuationCompleted().get()
+          || !expected.getTimeoutQueued().compareAndSet(false, true)) {
+        return;
+      }
+      try {
+        timeoutCompletion.execute(() -> expireTicket(expected.getName(), expected));
+      } catch (java.util.concurrent.RejectedExecutionException failure) {
+        expected.getTimeoutQueued().set(false);
+        LogManager.getLogger(LogType.ROOT).error("BID timeout completion rejected: " + expected.getName(), failure);
+      }
+      return;
+    }
+    expireTicket(key, expected);
+  }
+
+  private void expireTicket(String key, BidInfo expected) {
     BidInfo[] timedOut = { null };
 
     getBidInfoList().computeIfPresent(key, (k, cur) -> {
@@ -160,6 +177,7 @@ public class BidManager {
     if (bidInfo == null) {
       return;
     }
+    bidInfo.setStatus(BidStatus.TIMEOUT);
 
     try {
       Exchange exchange = bidInfo.getBeforeExchange();
@@ -232,7 +250,9 @@ public class BidManager {
 
     if (waiter[0] != null) {
 
-      ibkTimeoutBid.remove(key);
+      if (waiter[0].getAsyncCallback() == null) {
+        ibkTimeoutBid.remove(key);
+      }
 
       complete(waiter[0], exchange);
     }
@@ -268,6 +288,179 @@ public class BidManager {
   }
 
   public void workNotify(BidInfo info) {
-    info.getFuture().complete(null);
+    if (info.getAsyncCallback() == null) {
+      info.getFuture().complete(null);
+      return;
+    }
+    finishContinuation(info, false);
+  }
+
+  private static java.util.concurrent.ScheduledThreadPoolExecutor createDeadlineWatchdog() {
+    java.util.concurrent.ScheduledThreadPoolExecutor executor =
+        new java.util.concurrent.ScheduledThreadPoolExecutor(1, r -> {
+          Thread thread = new Thread(r, "mca-bid-deadline");
+          thread.setDaemon(true);
+          return thread;
+        });
+    executor.setRemoveOnCancelPolicy(true);
+    executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+    return executor;
+  }
+
+  private final java.util.concurrent.ScheduledThreadPoolExecutor deadlineWatchdog =
+      createDeadlineWatchdog();
+
+  private final java.util.concurrent.Semaphore asyncCapacity = new java.util.concurrent.Semaphore(512);
+  private final java.util.concurrent.ExecutorService timeoutCompletion =
+      new java.util.concurrent.ThreadPoolExecutor(2, 2, 0L,
+          java.util.concurrent.TimeUnit.MILLISECONDS,
+          new java.util.concurrent.ArrayBlockingQueue<Runnable>(512), r -> {
+        Thread thread = new Thread(r, "mca-bid-completion");
+        thread.setDaemon(true);
+        return thread;
+      }, new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+
+  private final Object asyncLifecycle = new Object();
+  private volatile boolean asyncStopping;
+
+  public boolean bidStartAsync(BidInfo incoming, org.apache.camel.AsyncCallback callback)
+      throws Exception {
+    if (asyncStopping || !asyncCapacity.tryAcquire()) {
+      throw new IBKExceptionMCA(ErrorType.MCA_BID, "BID service stopping or capacity exhausted");
+    }
+    incoming.setAsyncPermitOwned(true);
+    String key = incoming.getName();
+    incoming.setAsyncCallback(callback);
+    incoming.setAsyncMdc(org.slf4j.MDC.getCopyOfContextMap());
+    incoming.setStatus(BidStatus.WAIT);
+    incoming.setDeadlineNanos(System.nanoTime()
+        + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(incoming.getDefaultTimeOut()));
+    BidInfo[] early = { null };
+    BidInfo[] duplicate = { null };
+    synchronized (asyncLifecycle) {
+      if (asyncStopping) {
+        incoming.setAsyncPermitOwned(false);
+        asyncCapacity.release();
+        throw new IBKExceptionMCA(ErrorType.MCA_BID, "BID service is stopping");
+      }
+      bidInfoList.compute(key, (k, current) -> {
+      if (current != null && incoming.getBeforeExchange().getProperty("MCA_BID_OWNER") != null
+          && incoming.getBeforeExchange().getProperty("MCA_BID_OWNER") != current) {
+        duplicate[0] = current;
+        return current;
+      }
+      if (current == null || current.getStatus() == BidStatus.PENDING) {
+        return incoming;
+      }
+      if (current.getStatus() == BidStatus.RELEASED) {
+        early[0] = current;
+        return null;
+      }
+      duplicate[0] = current;
+      return current;
+      });
+    }
+    if (duplicate[0] != null) {
+      incoming.setAsyncPermitOwned(false);
+      asyncCapacity.release();
+      throw new IBKExceptionMCA(ErrorType.MCA_BID, "Duplicate BID dummy: " + key);
+    }
+    if (early[0] != null) {
+      incoming.setStatus(BidStatus.COMPLETE);
+      incoming.setAfterExchange(early[0].getAfterExchange());
+      incoming.getBeforeExchange().getIn().setBody(early[0].getAfterExchange().getIn().getBody());
+      bidInfoList.remove(key, early[0]);
+      finishContinuation(incoming, true);
+      return true;
+    }
+    try {
+      incoming.setFallbackDeadline(deadlineWatchdog.scheduleWithFixedDelay(() -> {
+        if (bidInfoList.get(key) == incoming
+            && System.nanoTime() - incoming.getDeadlineNanos() >= 0) {
+          bidTimeout(key, incoming);
+        }
+      }, incoming.getDefaultTimeOut(), 100L, java.util.concurrent.TimeUnit.MILLISECONDS));
+      if (incoming.getContinuationCompleted().get()) {
+        incoming.getFallbackDeadline().cancel(false);
+      }
+    } catch (RuntimeException failure) {
+      if (bidInfoList.remove(key, incoming)) {
+        incoming.setAsyncPermitOwned(false);
+        asyncCapacity.release();
+        throw new IBKExceptionMCA(ErrorType.MCA_BID, "BID deadline registration failed", failure);
+      }
+      return false;
+    }
+    incoming.setAsyncTimerKey(key + ":async:" + java.util.UUID.randomUUID().toString());
+    try {
+      ibkTimeoutBid.put(incoming.getAsyncTimerKey(), incoming, incoming.getDefaultTimeOut());
+      if (incoming.getContinuationCompleted().get()) {
+        ibkTimeoutBid.remove(incoming.getAsyncTimerKey());
+      }
+    } catch (Exception failure) {
+      LogManager.getLogger(LogType.ROOT).warn("Primary BID timer unavailable; fallback deadline armed: " + key);
+    }
+    incoming.setOriginalChannel(incoming.getBeforeExchange().getProperty(
+        "MCA_BID_ORIGINAL_CHANNEL", io.netty.channel.Channel.class));
+    if (incoming.getOriginalChannel() != null) {
+      incoming.setCloseListener(future -> bidTimeout(key, incoming));
+      incoming.getOriginalChannel().closeFuture().addListener(incoming.getCloseListener());
+      if (incoming.getContinuationCompleted().get()) {
+        incoming.getOriginalChannel().closeFuture().removeListener(incoming.getCloseListener());
+      }
+    }
+    return false;
+  }
+
+  private void finishContinuation(BidInfo info, boolean synchronous) {
+    if (!info.getContinuationCompleted().compareAndSet(false, true)) {
+      return;
+    }
+    Map<String, String> previous = org.slf4j.MDC.getCopyOfContextMap();
+    if (info.getAsyncTimerKey() != null) {
+      try {
+        ibkTimeoutBid.remove(info.getAsyncTimerKey());
+      } catch (RuntimeException failure) {
+        LogManager.getLogger(LogType.ROOT).warn("BID timer cleanup failed: " + info.getName(), failure);
+      }
+    }
+    if (info.getFallbackDeadline() != null) {
+      info.getFallbackDeadline().cancel(false);
+    }
+    if (info.getOriginalChannel() != null && info.getCloseListener() != null) {
+      info.getOriginalChannel().closeFuture().removeListener(info.getCloseListener());
+    }
+    try {
+      if (info.getAsyncMdc() == null) {
+        org.slf4j.MDC.clear();
+      } else {
+        org.slf4j.MDC.setContextMap(info.getAsyncMdc());
+      }
+      info.getAsyncCallback().done(synchronous);
+    } finally {
+      if (info.isAsyncPermitOwned()) {
+        info.setAsyncPermitOwned(false);
+        asyncCapacity.release();
+      }
+      if (previous == null) {
+        org.slf4j.MDC.clear();
+      } else {
+        org.slf4j.MDC.setContextMap(previous);
+      }
+    }
+  }
+
+  @javax.annotation.PreDestroy
+  public void shutdownAsync() {
+    synchronized (asyncLifecycle) {
+      asyncStopping = true;
+    }
+    deadlineWatchdog.shutdown();
+    for (Map.Entry<String, BidInfo> entry : bidInfoList.entrySet()) {
+      if (entry.getValue().getAsyncCallback() != null) {
+        expireTicket(entry.getKey(), entry.getValue());
+      }
+    }
+    timeoutCompletion.shutdown();
   }
 }

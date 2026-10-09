@@ -5,7 +5,13 @@ import com.ibkglobal.integrator.engine.builder.route.RouteCreateDefault;
 
 public class MCAInbound extends RouteCreateDefault {
 	
-	public MCAInbound(RouteCreateInfo builderInfo) {
+	private final org.apache.camel.AsyncProcessor afterProcessor;
+
+	public MCAInbound(RouteCreateInfo builderInfo, org.apache.camel.AsyncProcessor afterProcessor) {
+        if (afterProcessor == null) {
+            throw new IllegalArgumentException("BID async processor is required");
+        }
+        this.afterProcessor = afterProcessor;
 		super.setBuilderInfo(builderInfo);
 		onMCAException();
 		create();
@@ -32,7 +38,7 @@ public class MCAInbound extends RouteCreateDefault {
 		bean(com.ibkglobal.integrator.engine.bean.mca.common.ProcessHeaderMCA.class, "headerCheck")
 		
 		// 후 처리 업무
-		.bean(com.ibkglobal.integrator.engine.bean.mca.work.MCAWorkAfterProcess.class, "execute")
+		.process(afterProcessor)
 		
 		// 라우터 후 처리 : 헤더 설정 & Body 스키마 생성
 		.bean(com.ibkglobal.integrator.engine.bean.mca.common.ProcessAfterMCA.class, "afterProcess")
