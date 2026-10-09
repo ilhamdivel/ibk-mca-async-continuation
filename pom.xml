@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<groupId>com.ibkglobal.mca</groupId>
+  <artifactId>ibkglobal-mca</artifactId>
+  <version>0.0.1</version>
+  <packaging>war</packaging>
+
+  <name>ibkglobal-mca</name>
+  <description>IBK Ibkglobal Mca</description>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>1.5.10.RELEASE</version>
+    <relativePath /> <!-- lookup parent from repository -->
+  </parent>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <java.version>1.8</java.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.ibkglobal.message</groupId>
+      <artifactId>ibkglobal-message</artifactId>
+      <version>0.0.1-SNAPSHOT</version>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-aop</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-tomcat</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.batch</groupId>
+      <artifactId>spring-batch-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-configuration-processor</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-jdbc</artifactId>
+    </dependency>
+    
+    <!-- DB -->
+    <dependency>
+      <groupId>ojdbc</groupId>
+      <artifactId>ojdbc</artifactId>
+      <version>6</version>
+    </dependency>
+
+    <!-- cache -->
+    <dependency>
+      <groupId>net.sf.ehcache</groupId>
+      <artifactId>ehcache</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-cache</artifactId>
+    </dependency>
+
+    <!-- Camel -->
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-spring-boot-starter</artifactId>
+      <version>2.21.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-netty4-starter</artifactId>
+      <version>2.21.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-netty4-http-starter</artifactId>
+      <version>2.21.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-jms-starter</artifactId>
+      <version>2.21.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-ftp-starter</artifactId>
+      <version>2.21.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.camel</groupId>
+      <artifactId>camel-sql-starter</artifactId>
+      <version>2.21.1</version>
+    </dependency>
+
+    <!-- ActiveMQ -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-activemq</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.activemq</groupId>
+      <artifactId>activemq-pool</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.activemq</groupId>
+      <artifactId>activemq-camel</artifactId>
+    </dependency>
+    
+    <!-- TranJniApi -->
+    <dependency>
+      <groupId>com.penta</groupId>
+      <artifactId>tranJniApi</artifactId>
+      <version>1.0.0</version>
+    </dependency>
+    
+    <!-- Converter -->
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
+      <version>3.9</version>
+    </dependency>
+    
+<!--     <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency> -->
+    
+  </dependencies>
+
+  <!-- <build> -->
+  <!-- <plugins> -->
+  <!-- <plugin> -->
+  <!-- <groupId>org.springframework.boot</groupId> -->
+  <!-- <artifactId>spring-boot-maven-plugin</artifactId> -->
+  <!-- </plugin> -->
+  <!-- </plugins> -->
+  <!-- </build> -->
+  
+  <distributionManagement>
+    <repository>
+      <id>ibkglobal-nexus</id>
+      <name>Anyframe for IBK Kolumbus - RELEASE</name>
+      <url>http://172.29.201.70:60710/nexus/content/repositories/ibkglobal-nexus</url>
+    </repository>
+    <!-- use the following if you ARE using a snapshot version. -->
+    <snapshotRepository>
+      <id>ibkglobal-nexus-snapshots</id>
+      <name>Anyframe for IBK Kolumbus - SNAPSHOT</name>
+      <url>http://172.29.201.70:60710/nexus/content/repositories/ibkglobal-nexus-snapshots</url>
+      <uniqueVersion>true</uniqueVersion>
+    </snapshotRepository>
+  </distributionManagement>
+
+ <repositories> 
+   <repository>
+     <id>ibk-repository-release</id>
+     <name>Anyframe for IBK Kolumbus - RELEASE</name>
+     <layout>default</layout>
+     <url>http://172.29.201.70:60710/nexus/content/groups/public/</url>
+   </repository>
+   <repository>
+     <id>ibk-repository-snapshot</id>
+     <name>Anyframe for IBK Kolumbus - SNAPSHOT</name>
+     <layout>default</layout>
+     <url>http://172.29.201.70:60710/nexus/content/groups/public-snapshots/</url>
+     <snapshots>
+       <enabled>true</enabled>
+     </snapshots>
+   </repository>
+ </repositories>
+
+<!--  <pluginRepositories> -->
+<!--  <pluginRepository> -->
+<!--  <id>ibk-repository-release</id> -->
+<!--  <name>Anyframe for IBK Kolumbus - RELEASE</name> -->
+<!--  <layout>default</layout> -->
+<!--  <url>http://192.168.224.150:8082/nexus/content/groups/public/</url> -->
+<!--  </pluginRepository> -->
+<!--  <pluginRepository> -->
+<!--  <id>ibk-repository-snapshot</id> -->
+<!--  <name>Anyframe for IBK Kolumbus - SNAPSHOT</name> -->
+<!--  <layout>default</layout> -->
+<!--  <url>http://192.168.224.150:8082/nexus/content/groups/public-snapshots/</url> -->
+<!--  </pluginRepository> -->
+<!--  </pluginRepositories> -->
+
+</project>

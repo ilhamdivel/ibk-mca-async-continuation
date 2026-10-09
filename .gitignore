@@ -1,0 +1,8 @@
+target/
+.svn/
+*.log
+*.jar
+*.war
+.env*
+src/main/resources/
+tests/output/
