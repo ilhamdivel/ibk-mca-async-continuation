@@ -178,6 +178,10 @@ public class BidManager {
       return;
     }
     bidInfo.setStatus(BidStatus.TIMEOUT);
+    if (bidInfo.getAsyncCallback() != null) {
+      asyncTimedOut.incrementAndGet();
+    }
+    LogManager.getLogger(LogType.ROOT).info("Bid Timeout : " + key);
 
     try {
       Exchange exchange = bidInfo.getBeforeExchange();
@@ -262,6 +266,8 @@ public class BidManager {
 
       if (waiter[0].getAsyncCallback() == null) {
         ibkTimeoutBid.remove(key);
+      } else {
+        asyncDelivered.incrementAndGet();
       }
 
       complete(waiter[0], exchange);
@@ -347,6 +353,65 @@ public class BidManager {
     return asyncCapacityLimit;
   }
 
+  // Cumulative counters since start (per node) for the dummy-ack continuation.
+  private final java.util.concurrent.atomic.AtomicLong asyncSuspended = new java.util.concurrent.atomic.AtomicLong();
+  private final java.util.concurrent.atomic.AtomicLong asyncDelivered = new java.util.concurrent.atomic.AtomicLong();
+  private final java.util.concurrent.atomic.AtomicLong asyncEarlyRelease = new java.util.concurrent.atomic.AtomicLong();
+  private final java.util.concurrent.atomic.AtomicLong asyncTimedOut = new java.util.concurrent.atomic.AtomicLong();
+  private final java.util.concurrent.atomic.AtomicLong asyncNotAccepted = new java.util.concurrent.atomic.AtomicLong();
+  private final java.util.concurrent.atomic.AtomicLong asyncDuplicate = new java.util.concurrent.atomic.AtomicLong();
+  private volatile String lastLoggedCounters = "";
+
+  /** Continuations currently suspended (holding a capacity permit). */
+  public int getAsyncPendingCount() {
+    return asyncCapacityLimit - asyncCapacity.availablePermits();
+  }
+
+  /** Age in ms of the oldest suspended continuation, 0 when none. */
+  public long getOldestAsyncPendingMillis() {
+    long now = System.nanoTime();
+    long oldest = 0L;
+    for (BidInfo info : bidInfoList.values()) {
+      if (info.getAsyncCallback() != null && info.getStatus() == BidStatus.WAIT) {
+        long startedNanos = info.getDeadlineNanos()
+            - java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(info.getDefaultTimeOut());
+        oldest = Math.max(oldest, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(now - startedNanos));
+      }
+    }
+    return oldest;
+  }
+
+  private String asyncCounters() {
+    return "suspended=" + asyncSuspended.get() + ", delivered=" + asyncDelivered.get()
+        + ", earlyRelease=" + asyncEarlyRelease.get() + ", timedOut=" + asyncTimedOut.get()
+        + ", notAccepted=" + asyncNotAccepted.get() + ", duplicate=" + asyncDuplicate.get();
+  }
+
+  /** One-line snapshot for logs / admin endpoints. */
+  public String getAsyncStats() {
+    return "pending=" + getAsyncPendingCount() + "/" + asyncCapacityLimit
+        + ", oldestPendingMs=" + getOldestAsyncPendingMillis() + ", " + asyncCounters();
+  }
+
+  /**
+   * Every 60 s, log the snapshot when something is pending or a counter moved,
+   * so a quiet node does not spam the log.
+   */
+  @javax.annotation.PostConstruct
+  public void startAsyncStatsLog() {
+    deadlineWatchdog.scheduleWithFixedDelay(() -> {
+      try {
+        String counters = asyncCounters();
+        if (getAsyncPendingCount() > 0 || !counters.equals(lastLoggedCounters)) {
+          lastLoggedCounters = counters;
+          LogManager.getLogger(LogType.ROOT).info("Bid async stats : " + getAsyncStats());
+        }
+      } catch (RuntimeException failure) {
+        LogManager.getLogger(LogType.ROOT).warn("Bid async stats failed", failure);
+      }
+    }, 60L, 60L, java.util.concurrent.TimeUnit.SECONDS);
+  }
+
   private final java.util.concurrent.ExecutorService timeoutCompletion =
       new java.util.concurrent.ThreadPoolExecutor(2, 2, 0L,
           java.util.concurrent.TimeUnit.MILLISECONDS,
@@ -400,12 +465,15 @@ public class BidManager {
       });
     }
     if (duplicate[0] != null) {
+      asyncDuplicate.incrementAndGet();
       throw new IBKExceptionMCA(ErrorType.MCA_BID, "Duplicate BID dummy: " + key);
     }
     if (notAccepted[0] != null) {
       return respondAsBidTimeout(incoming, notAccepted[0]);
     }
     if (early[0] != null) {
+      asyncEarlyRelease.incrementAndGet();
+      LogManager.getLogger(LogType.ROOT).info("Bid release arrived before dummy ack, complete without wait : " + key);
       incoming.setStatus(BidStatus.COMPLETE);
       incoming.setAfterExchange(early[0].getAfterExchange());
       incoming.getBeforeExchange().getIn().setBody(early[0].getAfterExchange().getIn().getBody());
@@ -413,6 +481,7 @@ public class BidManager {
       finishContinuation(incoming, true);
       return true;
     }
+    asyncSuspended.incrementAndGet();
     try {
       incoming.setFallbackDeadline(deadlineWatchdog.scheduleWithFixedDelay(() -> {
         if (bidInfoList.get(key) == incoming
@@ -455,6 +524,7 @@ public class BidManager {
    * and invite a retry (double transfer risk). Completes synchronously.
    */
   private boolean respondAsBidTimeout(BidInfo incoming, String reason) {
+    asyncNotAccepted.incrementAndGet();
     LogManager.getLogger(LogType.ROOT)
         .warn("BID continuation not accepted (" + reason + "), answered as BID timeout : " + incoming.getName());
     Exchange exchange = incoming.getBeforeExchange();

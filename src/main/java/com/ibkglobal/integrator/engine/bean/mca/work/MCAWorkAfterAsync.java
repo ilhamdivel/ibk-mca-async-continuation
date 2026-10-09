@@ -38,6 +38,10 @@ public class MCAWorkAfterAsync implements AsyncProcessor {
             IBKMessage message = exchange.getIn().getBody(IBKMessage.class);
             StandardTelegram telegram = message.getStandardTelegram();
             if (telegram != null && "4".equals(telegram.getSttlSysCopt().getOtptTmgtDcd())) {
+                // Same text as the office MCAWorkAfterProcess line: operations grep for it
+                // to find dummy acks (N4) during BID root-cause analysis.
+                com.ibkglobal.log.LogManager.getLogger(com.ibkglobal.log.LogType.ROOT)
+                    .info("MCAWorkAfterProcess dummyCheck InterfaceID: " + message.getInterfaceId());
                 return bidManager.bidStartAsync(BidUtil.bidCreate(exchange, telegram), guarded);
             }
         } catch (Exception failure) {
