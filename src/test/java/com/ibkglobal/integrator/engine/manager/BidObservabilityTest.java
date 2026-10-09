@@ -91,6 +91,24 @@ public class BidObservabilityTest {
     }
 
     @Test
+    public void deadlineArmFailureIsAnsweredAsTimeoutAndNotCountedAsSuspended() throws Exception {
+        java.lang.reflect.Field watchdog = BidManager.class.getDeclaredField("deadlineWatchdog");
+        watchdog.setAccessible(true);
+        ((java.util.concurrent.ExecutorService) watchdog.get(manager)).shutdown();
+        BidInfo ticket = ticket("arm-fail");
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        assertTrue(manager.bidStartAsync(ticket, sync -> { assertTrue(sync); calls.incrementAndGet(); }));
+        assertEquals(1, calls.get());
+        assertEquals(BidInfo.BidStatus.TIMEOUT, ticket.getStatus());
+        assertEquals("Transaction processing is delayed. Please wait.",
+            ticket.getBeforeExchange().getIn().getHeader(com.ibkglobal.integrator.config.ConstantCode.ERR_MSG));
+        assertTrue(manager.getBidInfoList().isEmpty());
+        String stats = manager.getAsyncStats();
+        assertTrue(stats, stats.startsWith("pending=0/512"));
+        assertTrue(stats, stats.contains("suspended=0") && stats.contains("notAccepted=1"));
+    }
+
+    @Test
     public void countersTrackEveryOutcome() throws Exception {
         manager.setAsyncCapacity(2);
         assertFalse(manager.bidStartAsync(ticket("delivered"), sync -> { }));

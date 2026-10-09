@@ -32,7 +32,7 @@ Operational log lines: `MCAWorkAfterProcess dummyCheck InterfaceID: <id>`, `Bid 
 
 ### Audit verification
 
-JDK 1.8.0_261 with the real `camel-core`, `camel-netty4`, `camel-netty4-http` 2.21.1 and `netty-all` 4.1.22.Final jars. The internal Nexus was not reachable, so `ibkglobal-message` was compiled from the office SVN source, three unavailable internal types were stubbed (`InstanceType`, `ConverterService`, `ActiveMQConnectionFactory`), Spring 5.3 jars stood in for 4.3 and Mockito 4 for 1.10 (`verifyZeroInteractions` renamed in the harness copy only). Result on `audit-fixes`: `OK (23 tests)` in every run (BidAsync, BidFault, BidNetty, BidCapacityConfig, BidObservability, BidTopology). This is compile/unit/route-level evidence, not an office build.
+JDK 1.8.0_261 with the real `camel-core`, `camel-netty4`, `camel-netty4-http` 2.21.1 and `netty-all` 4.1.22.Final jars. The internal Nexus was not reachable, so `ibkglobal-message` was compiled from the office SVN source, three unavailable internal types were stubbed (`InstanceType`, `ConverterService`, `ActiveMQConnectionFactory`), Spring 5.3 jars stood in for 4.3 and Mockito 4 for 1.10 (`verifyZeroInteractions` renamed in the harness copy only). Result on `audit-fixes`: `OK (24 tests)` in every run (BidAsync, BidFault, BidNetty, BidCapacityConfig, BidObservability, BidTopology). This is compile/unit/route-level evidence, not an office build.
 
 ### Still required before production
 

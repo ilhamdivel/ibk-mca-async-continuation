@@ -481,7 +481,6 @@ public class BidManager {
       finishContinuation(incoming, true);
       return true;
     }
-    asyncSuspended.incrementAndGet();
     try {
       incoming.setFallbackDeadline(deadlineWatchdog.scheduleWithFixedDelay(() -> {
         if (bidInfoList.get(key) == incoming
@@ -499,8 +498,10 @@ public class BidManager {
         LogManager.getLogger(LogType.ROOT).error("BID deadline registration failed : " + key, failure);
         return respondAsBidTimeout(incoming, "BID deadline registration failed");
       }
+      asyncSuspended.incrementAndGet();
       return false;
     }
+    asyncSuspended.incrementAndGet();
     incoming.setAsyncTimerKey(key + ":async:" + java.util.UUID.randomUUID().toString());
     try {
       ibkTimeoutBid.put(incoming.getAsyncTimerKey(), incoming, incoming.getDefaultTimeOut());
