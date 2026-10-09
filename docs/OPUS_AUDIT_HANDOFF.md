@@ -2,6 +2,8 @@
 
 ## Audit Follow-up (2026-10-10, branch `audit-fixes`)
 
+Full report with evidence, reproduction steps and a re-audit checklist: [`AUDIT_REPORT_BID_CONTINUATION.md`](AUDIT_REPORT_BID_CONTINUATION.md).
+
 Independent audit of `95649d8` against `office-baseline`. Verdict: **not production-ready as delivered**. The state machine held up (no double completion, lost ticket or lock-held callback found), but the main scope claim was wrong for the deployed topology and three new behaviours needed decisions. This branch applies the decisions, one commit per finding.
 
 ### Scope correction (proven, not fixed in this branch)
@@ -32,7 +34,7 @@ Operational log lines: `MCAWorkAfterProcess dummyCheck InterfaceID: <id>`, `Bid 
 
 ### Audit verification
 
-JDK 1.8.0_261 with the real `camel-core`, `camel-netty4`, `camel-netty4-http` 2.21.1 and `netty-all` 4.1.22.Final jars. The internal Nexus was not reachable, so `ibkglobal-message` was compiled from the office SVN source, three unavailable internal types were stubbed (`InstanceType`, `ConverterService`, `ActiveMQConnectionFactory`), Spring 5.3 jars stood in for 4.3 and Mockito 4 for 1.10 (`verifyZeroInteractions` renamed in the harness copy only). Result on `audit-fixes`: `OK (24 tests)` in every run (BidAsync, BidFault, BidNetty, BidCapacityConfig, BidObservability, BidTopology). This is compile/unit/route-level evidence, not an office build.
+JDK 1.8.0_261 with the real `camel-core`, `camel-netty4`, `camel-netty4-http` 2.21.1 and `netty-all` 4.1.22.Final jars. The internal Nexus was not reachable, so `ibkglobal-message` was compiled from the office SVN source, three unavailable internal types were stubbed (`InstanceType`, `ConverterService`, `ActiveMQConnectionFactory`), Spring 5.3 jars stood in for 4.3 and Mockito 4 for 1.10 (`verifyZeroInteractions` renamed in the harness copy only). Result on `audit-fixes`: `OK (25 tests)` in every run (BidAsync, BidFault, BidNetty, BidCapacityConfig, BidObservability, BidTopology). This is compile/unit/route-level evidence, not an office build.
 
 ### Still required before production
 
