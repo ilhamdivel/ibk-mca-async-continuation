@@ -22,10 +22,16 @@ public class BidInfo {
 
   private org.apache.camel.AsyncCallback asyncCallback;
   private long deadlineNanos;
-  private String asyncTimerKey;
+  // volatile: armed by the dummy-ack thread AFTER the ticket is visible in
+  // bidInfoList and read by whichever thread completes it. Together with
+  // continuationCompleted this is a "write, then check the other flag" handshake
+  // that is only safe when both sides are volatile; otherwise a release can miss
+  // the timer while the arming thread misses the completion, and the 100 ms
+  // fallback task would never be cancelled.
+  private volatile String asyncTimerKey;
   private final java.util.concurrent.atomic.AtomicBoolean timeoutQueued =
       new java.util.concurrent.atomic.AtomicBoolean(false);
-  private java.util.concurrent.ScheduledFuture<?> fallbackDeadline;
+  private volatile java.util.concurrent.ScheduledFuture<?> fallbackDeadline;
   private boolean asyncPermitOwned;
   private java.util.Map<String, String> asyncMdc;
   private final java.util.concurrent.atomic.AtomicBoolean continuationCompleted =
