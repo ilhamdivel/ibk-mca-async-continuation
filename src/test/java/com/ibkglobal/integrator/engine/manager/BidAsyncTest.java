@@ -98,19 +98,28 @@ public class BidAsyncTest {
     }
 
     @Test
-    public void shutdownResolvesPendingAndRejectsNewRequests() throws Exception {
+    public void shutdownResolvesPendingAndAnswersNewRequestsAsTimeout() throws Exception {
         BidManager manager = new BidManager();
         manager.ibkTimeoutBid = mock(IBKTimeout.class);
+        DefaultCamelContext context = new DefaultCamelContext();
         BidInfo ticket = new BidInfo();
         ticket.setName("shutdown");
-        ticket.setBeforeExchange(new DefaultExchange(new DefaultCamelContext()));
+        ticket.setBeforeExchange(new DefaultExchange(context));
         AtomicInteger calls = new AtomicInteger();
         manager.bidStartAsync(ticket, sync -> calls.incrementAndGet());
         manager.shutdownAsync();
         assertEquals(1, calls.get());
         assertTrue(manager.getBidInfoList().isEmpty());
-        try { manager.bidStartAsync(ticket, sync -> calls.incrementAndGet()); fail("Must reject after shutdown"); }
-        catch (com.ibkglobal.integrator.exception.IBKExceptionMCA expected) { }
+        BidInfo late = new BidInfo();
+        late.setName("after-shutdown");
+        late.setBeforeExchange(new DefaultExchange(context));
+        AtomicInteger lateCalls = new AtomicInteger();
+        assertTrue(manager.bidStartAsync(late, sync -> { assertTrue(sync); lateCalls.incrementAndGet(); }));
+        assertEquals(1, lateCalls.get());
+        assertEquals(BidStatus.TIMEOUT, late.getStatus());
+        assertEquals("Transaction processing is delayed. Please wait.",
+            late.getBeforeExchange().getIn().getHeader(com.ibkglobal.integrator.config.ConstantCode.ERR_MSG));
+        assertTrue(manager.getBidInfoList().isEmpty());
     }
 
     @Test

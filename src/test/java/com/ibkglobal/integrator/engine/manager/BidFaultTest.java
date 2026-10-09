@@ -1,8 +1,9 @@
 package com.ibkglobal.integrator.engine.manager;
 
+import com.ibkglobal.integrator.config.ConstantCode;
 import com.ibkglobal.integrator.engine.model.BidInfo;
 import com.ibkglobal.integrator.engine.timer.IBKTimeout;
-import com.ibkglobal.integrator.exception.IBKExceptionMCA;
+import com.ibkglobal.integrator.exception.ErrorType;
 import org.apache.camel.Exchange;
 import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.camel.impl.DefaultExchange;
@@ -26,24 +27,76 @@ public class BidFaultTest {
         return ticket;
     }
 
-    @Test public void saturationRejectsAndReleasedCapacityIsReusable() throws Exception {
+    private static void assertAnsweredAsBidTimeout(BidInfo ticket) {
+        assertEquals(BidInfo.BidStatus.TIMEOUT, ticket.getStatus());
+        String errCode = ticket.getBeforeExchange().getIn().getHeader(ConstantCode.ERR_CODE, String.class);
+        assertTrue("ERR_CODE " + errCode, errCode.endsWith(ErrorType.MCA_BID_TIMEOUT.getErrorCode()));
+        assertEquals("Transaction processing is delayed. Please wait.",
+            ticket.getBeforeExchange().getIn().getHeader(ConstantCode.ERR_MSG));
+        assertNull(ticket.getBeforeExchange().getException());
+    }
+
+    @Test public void saturationAnswersAsBidTimeoutAndReleasedCapacityIsReusable() throws Exception {
         BidManager manager = manager();
         DefaultCamelContext context = new DefaultCamelContext();
         AtomicInteger calls = new AtomicInteger();
         try {
+            assertEquals(512, manager.getAsyncCapacityLimit());
             for (int i = 0; i < 512; i++) {
                 assertFalse(manager.bidStartAsync(ticket("capacity-" + i, context), sync -> calls.incrementAndGet()));
             }
-            try {
-                manager.bidStartAsync(ticket("overflow", context), sync -> fail("Rejected ticket must not complete"));
-                fail("Capacity must be bounded");
-            } catch (IBKExceptionMCA expected) { }
+            // Dummy ack means the host already accepted the transaction: overload must
+            // not become a hard MCA_BID error (channel would treat it as failed).
+            BidInfo overflow = ticket("overflow", context);
+            AtomicInteger overflowCalls = new AtomicInteger();
+            assertTrue(manager.bidStartAsync(overflow, sync -> { assertTrue(sync); overflowCalls.incrementAndGet(); }));
+            assertEquals(1, overflowCalls.get());
+            assertAnsweredAsBidTimeout(overflow);
             assertEquals(512, manager.getBidInfoList().size());
+            assertFalse(manager.getBidInfoList().containsKey("overflow"));
             manager.bidResult("capacity-0", new DefaultExchange(context));
             assertFalse(manager.bidStartAsync(ticket("replacement", context), sync -> calls.incrementAndGet()));
         } finally { manager.shutdownAsync(); }
         assertEquals(513, calls.get());
         assertTrue(manager.getBidInfoList().isEmpty());
+    }
+
+    @Test public void configuredCapacityIsHonouredAndValidated() throws Exception {
+        BidManager manager = manager();
+        DefaultCamelContext context = new DefaultCamelContext();
+        try {
+            try { manager.setAsyncCapacity(0); fail("capacity < 1 must be rejected"); }
+            catch (IllegalArgumentException expected) { }
+            manager.setAsyncCapacity(2);
+            assertFalse(manager.bidStartAsync(ticket("a", context), sync -> { }));
+            assertFalse(manager.bidStartAsync(ticket("b", context), sync -> { }));
+            try { manager.setAsyncCapacity(10); fail("must not resize while continuations are pending"); }
+            catch (IllegalStateException expected) { }
+            BidInfo third = ticket("c", context);
+            assertTrue(manager.bidStartAsync(third, sync -> { }));
+            assertAnsweredAsBidTimeout(third);
+        } finally { manager.shutdownAsync(); }
+    }
+
+    @Test public void parkedReleaseCompletesWithRealResponseEvenWhenSaturated() throws Exception {
+        BidManager manager = manager();
+        DefaultCamelContext context = new DefaultCamelContext();
+        try {
+            manager.setAsyncCapacity(1);
+            assertFalse(manager.bidStartAsync(ticket("occupied", context), sync -> { }));
+            BidInfo owner = manager.bidPreRegister("early");
+            Exchange release = new DefaultExchange(context);
+            release.getIn().setBody("final");
+            assertEquals(BidManager.ReleaseResult.PARKED, manager.bidResult("early", release));
+            BidInfo dummy = ticket("early", context);
+            dummy.getBeforeExchange().setProperty("MCA_BID_OWNER", owner);
+            AtomicInteger calls = new AtomicInteger();
+            assertTrue(manager.bidStartAsync(dummy, sync -> { assertTrue(sync); calls.incrementAndGet(); }));
+            assertEquals(1, calls.get());
+            assertEquals(BidInfo.BidStatus.COMPLETE, dummy.getStatus());
+            assertEquals("final", dummy.getBeforeExchange().getIn().getBody());
+            assertNull(dummy.getBeforeExchange().getIn().getHeader(ConstantCode.ERR_CODE));
+        } finally { manager.shutdownAsync(); }
     }
 
     @Test public void callbackFailureRestoresMdcAndDoesNotLeakCapacity() throws Exception {
@@ -100,18 +153,20 @@ public class BidFaultTest {
                 CountDownLatch start = new CountDownLatch(1);
                 Future<Boolean> registered = executor.submit(() -> {
                     start.await();
-                    try { manager.bidStartAsync(ticket, sync -> calls.incrementAndGet()); return true; }
-                    catch (IBKExceptionMCA expected) { return false; }
+                    return manager.bidStartAsync(ticket, sync -> calls.incrementAndGet());
                 });
                 Future<?> shutdown = executor.submit(() -> {
                     try { start.await(); manager.shutdownAsync(); }
                     catch (InterruptedException interrupted) { throw new AssertionError(interrupted); }
                 });
                 start.countDown();
-                boolean accepted = registered.get(3, TimeUnit.SECONDS);
+                registered.get(3, TimeUnit.SECONDS);
                 shutdown.get(3, TimeUnit.SECONDS);
+                // Either parked then expired by shutdown, or answered as BID timeout
+                // because the node was already stopping: exactly one completion, no error.
                 assertTrue(manager.getBidInfoList().isEmpty());
-                assertEquals(accepted ? 1 : 0, calls.get());
+                assertEquals(1, calls.get());
+                assertEquals(BidInfo.BidStatus.TIMEOUT, ticket.getStatus());
             }
         } finally { executor.shutdownNow(); }
     }

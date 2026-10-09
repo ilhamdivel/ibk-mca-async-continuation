@@ -182,29 +182,7 @@ public class BidManager {
     try {
       Exchange exchange = bidInfo.getBeforeExchange();
 
-      Throwable throwable = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Throwable.class);
-
-      exchange.setProperty(Exchange.EXCEPTION_CAUGHT,
-          new IBKExceptionMCA(ErrorType.MCA_BID_TIMEOUT, "Bid Timeout Exception", throwable));
-
-      Message message = exchange.getIn();
-
-      String bizCode = message.getHeader(ConstantCode.BIZ_CODE, String.class);
-
-      if (bizCode == null || bizCode.length() != 3)
-        bizCode = InfraType.MCA.name();
-
-      String errCd = ConstantCode.ERROR_HEAD + InfraType.MCA.name() + (bizCode)
-          + ErrorType.MCA_BID_TIMEOUT.getErrorCode();
-
-      message.setHeader(ConstantCode.ERR_SPOT, InfraType.MCA);
-      message.setHeader(ConstantCode.ERR_CODE, errCd);
-      message.setHeader(ConstantCode.ERR_MSG, "Transaction processing is delayed. Please wait.");
-
-      ErrorUtil.setErrorMessage(exchange);
-
-      // Result Set
-      exchange.getOut().copyFrom(exchange.getIn());
+      applyBidTimeoutResult(exchange);
 
       bidInfo.setStatus(BidStatus.TIMEOUT);
       bidInfo.setAfterExchange(exchange);
@@ -213,6 +191,38 @@ public class BidManager {
       // the entry is already gone from bidInfoList.
       workNotify(bidInfo);
     }
+  }
+
+  /**
+   * The BID timeout answer ("Transaction processing is delayed. Please wait.",
+   * MCA_BID_TIMEOUT). Shared by the real timeout and by every case where an
+   * already-accepted (dummy ack) transaction cannot be parked, so the channel
+   * never sees a hard failure for something the host is still processing.
+   */
+  private void applyBidTimeoutResult(Exchange exchange) {
+    Throwable throwable = exchange.getProperty(Exchange.EXCEPTION_CAUGHT, Throwable.class);
+
+    exchange.setProperty(Exchange.EXCEPTION_CAUGHT,
+        new IBKExceptionMCA(ErrorType.MCA_BID_TIMEOUT, "Bid Timeout Exception", throwable));
+
+    Message message = exchange.getIn();
+
+    String bizCode = message.getHeader(ConstantCode.BIZ_CODE, String.class);
+
+    if (bizCode == null || bizCode.length() != 3)
+      bizCode = InfraType.MCA.name();
+
+    String errCd = ConstantCode.ERROR_HEAD + InfraType.MCA.name() + (bizCode)
+        + ErrorType.MCA_BID_TIMEOUT.getErrorCode();
+
+    message.setHeader(ConstantCode.ERR_SPOT, InfraType.MCA);
+    message.setHeader(ConstantCode.ERR_CODE, errCd);
+    message.setHeader(ConstantCode.ERR_MSG, "Transaction processing is delayed. Please wait.");
+
+    ErrorUtil.setErrorMessage(exchange);
+
+    // Result Set
+    exchange.getOut().copyFrom(exchange.getIn());
   }
 
   /**
@@ -310,7 +320,33 @@ public class BidManager {
   private final java.util.concurrent.ScheduledThreadPoolExecutor deadlineWatchdog =
       createDeadlineWatchdog();
 
-  private final java.util.concurrent.Semaphore asyncCapacity = new java.util.concurrent.Semaphore(512);
+  static final int DEFAULT_ASYNC_CAPACITY = 512;
+
+  private volatile int asyncCapacityLimit = DEFAULT_ASYNC_CAPACITY;
+  private volatile java.util.concurrent.Semaphore asyncCapacity =
+      new java.util.concurrent.Semaphore(DEFAULT_ASYNC_CAPACITY);
+
+  /**
+   * Maximum number of suspended dummy-ack continuations per node
+   * (integrator.config.bid-async-capacity, default 512). Startup only: the
+   * semaphore cannot be swapped while permits are in use.
+   */
+  @org.springframework.beans.factory.annotation.Value("${integrator.config.bid-async-capacity:512}")
+  public void setAsyncCapacity(int capacity) {
+    if (capacity < 1) {
+      throw new IllegalArgumentException("integrator.config.bid-async-capacity must be >= 1 : " + capacity);
+    }
+    if (asyncCapacity.availablePermits() != asyncCapacityLimit) {
+      throw new IllegalStateException("BID async capacity cannot change while continuations are pending");
+    }
+    asyncCapacityLimit = capacity;
+    asyncCapacity = new java.util.concurrent.Semaphore(capacity);
+  }
+
+  public int getAsyncCapacityLimit() {
+    return asyncCapacityLimit;
+  }
+
   private final java.util.concurrent.ExecutorService timeoutCompletion =
       new java.util.concurrent.ThreadPoolExecutor(2, 2, 0L,
           java.util.concurrent.TimeUnit.MILLISECONDS,
@@ -325,10 +361,6 @@ public class BidManager {
 
   public boolean bidStartAsync(BidInfo incoming, org.apache.camel.AsyncCallback callback)
       throws Exception {
-    if (asyncStopping || !asyncCapacity.tryAcquire()) {
-      throw new IBKExceptionMCA(ErrorType.MCA_BID, "BID service stopping or capacity exhausted");
-    }
-    incoming.setAsyncPermitOwned(true);
     String key = incoming.getName();
     incoming.setAsyncCallback(callback);
     incoming.setAsyncMdc(org.slf4j.MDC.getCopyOfContextMap());
@@ -337,12 +369,8 @@ public class BidManager {
         + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(incoming.getDefaultTimeOut()));
     BidInfo[] early = { null };
     BidInfo[] duplicate = { null };
+    String[] notAccepted = { null };
     synchronized (asyncLifecycle) {
-      if (asyncStopping) {
-        incoming.setAsyncPermitOwned(false);
-        asyncCapacity.release();
-        throw new IBKExceptionMCA(ErrorType.MCA_BID, "BID service is stopping");
-      }
       bidInfoList.compute(key, (k, current) -> {
       if (current != null && incoming.getBeforeExchange().getProperty("MCA_BID_OWNER") != null
           && incoming.getBeforeExchange().getProperty("MCA_BID_OWNER") != current) {
@@ -350,6 +378,17 @@ public class BidManager {
         return current;
       }
       if (current == null || current.getStatus() == BidStatus.PENDING) {
+        // A permit is only needed to suspend; a parked release (below) is
+        // completed synchronously even when the node is saturated or stopping.
+        if (asyncStopping) {
+          notAccepted[0] = "BID service is stopping";
+          return current;
+        }
+        if (!asyncCapacity.tryAcquire()) {
+          notAccepted[0] = "BID async capacity exhausted (" + asyncCapacityLimit + ")";
+          return current;
+        }
+        incoming.setAsyncPermitOwned(true);
         return incoming;
       }
       if (current.getStatus() == BidStatus.RELEASED) {
@@ -361,9 +400,10 @@ public class BidManager {
       });
     }
     if (duplicate[0] != null) {
-      incoming.setAsyncPermitOwned(false);
-      asyncCapacity.release();
       throw new IBKExceptionMCA(ErrorType.MCA_BID, "Duplicate BID dummy: " + key);
+    }
+    if (notAccepted[0] != null) {
+      return respondAsBidTimeout(incoming, notAccepted[0]);
     }
     if (early[0] != null) {
       incoming.setStatus(BidStatus.COMPLETE);
@@ -387,7 +427,8 @@ public class BidManager {
       if (bidInfoList.remove(key, incoming)) {
         incoming.setAsyncPermitOwned(false);
         asyncCapacity.release();
-        throw new IBKExceptionMCA(ErrorType.MCA_BID, "BID deadline registration failed", failure);
+        LogManager.getLogger(LogType.ROOT).error("BID deadline registration failed : " + key, failure);
+        return respondAsBidTimeout(incoming, "BID deadline registration failed");
       }
       return false;
     }
@@ -405,6 +446,25 @@ public class BidManager {
     // a release arriving after the client disconnected is still DELIVERED
     // instead of being reported as a BID timeout + "bidInfo is null".
     return false;
+  }
+
+  /**
+   * The host already accepted this transaction (dummy ack) but the node cannot
+   * park it. Answer exactly like a BID timeout (MCA_BID_TIMEOUT, "please wait")
+   * instead of a hard MCA_BID error, so the channel does not treat it as failed
+   * and invite a retry (double transfer risk). Completes synchronously.
+   */
+  private boolean respondAsBidTimeout(BidInfo incoming, String reason) {
+    LogManager.getLogger(LogType.ROOT)
+        .warn("BID continuation not accepted (" + reason + "), answered as BID timeout : " + incoming.getName());
+    Exchange exchange = incoming.getBeforeExchange();
+    applyBidTimeoutResult(exchange);
+    incoming.setStatus(BidStatus.TIMEOUT);
+    incoming.setAfterExchange(exchange);
+    if (incoming.getContinuationCompleted().compareAndSet(false, true)) {
+      incoming.getAsyncCallback().done(true);
+    }
+    return true;
   }
 
   private void finishContinuation(BidInfo info, boolean synchronous) {
