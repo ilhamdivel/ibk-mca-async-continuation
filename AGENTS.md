@@ -28,4 +28,5 @@ Preserve existing error codes and complete continuations once only.
 ## Troubleshooting
 - Missing internal Maven artifacts: use the real-artifact offline harness.
 - Callback on a different JVM: outside async scope.
-- Channel closed: dispose pending continuation without duplicate writes.
+- Channel closed: keep the ticket until the release or the 100 s deadline (office baseline); never write a second response.
+- Overload, stopping or deadline-arm failure after a dummy ack: answer as BID timeout (01002), never a hard MCA_BID error.
