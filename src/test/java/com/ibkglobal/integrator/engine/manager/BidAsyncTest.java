@@ -137,21 +137,26 @@ public class BidAsyncTest {
     }
 
     @Test
-    public void closedChannelDisposesContinuation() throws Exception {
+    public void closedChannelKeepsTicketUntilRelease() throws Exception {
+        // Office baseline semantics: a client disconnect must not turn into an early
+        // BID timeout, otherwise the later real release is reported as "bidInfo is null".
         BidManager manager = new BidManager();
         manager.ibkTimeoutBid = mock(IBKTimeout.class);
         io.netty.channel.embedded.EmbeddedChannel channel = new io.netty.channel.embedded.EmbeddedChannel();
+        DefaultCamelContext context = new DefaultCamelContext();
         BidInfo ticket = new BidInfo();
         ticket.setName("closed");
-        ticket.setBeforeExchange(new DefaultExchange(new DefaultCamelContext()));
+        ticket.setBeforeExchange(new DefaultExchange(context));
         ticket.getBeforeExchange().setProperty("MCA_BID_ORIGINAL_CHANNEL", channel);
-        CountDownLatch done = new CountDownLatch(1);
         AtomicInteger calls = new AtomicInteger();
-        manager.bidStartAsync(ticket, sync -> { calls.incrementAndGet(); done.countDown(); });
+        assertFalse(manager.bidStartAsync(ticket, sync -> calls.incrementAndGet()));
         channel.close(); channel.runPendingTasks();
-        assertTrue(done.await(3, TimeUnit.SECONDS));
+        Thread.sleep(200);
+        assertEquals(0, calls.get());
+        assertSame(ticket, manager.getBidInfoList().get("closed"));
+        assertEquals(BidManager.ReleaseResult.DELIVERED, manager.bidResult("closed", new DefaultExchange(context)));
         assertEquals(1, calls.get());
-        assertTrue(manager.getBidInfoList().isEmpty());
+        assertEquals(BidStatus.COMPLETE, ticket.getStatus());
         manager.shutdownAsync();
     }
 

@@ -26,8 +26,6 @@ public class BidInfo {
   private final java.util.concurrent.atomic.AtomicBoolean timeoutQueued =
       new java.util.concurrent.atomic.AtomicBoolean(false);
   private java.util.concurrent.ScheduledFuture<?> fallbackDeadline;
-  private io.netty.channel.ChannelFutureListener closeListener;
-  private io.netty.channel.Channel originalChannel;
   private boolean asyncPermitOwned;
   private java.util.Map<String, String> asyncMdc;
   private final java.util.concurrent.atomic.AtomicBoolean continuationCompleted =

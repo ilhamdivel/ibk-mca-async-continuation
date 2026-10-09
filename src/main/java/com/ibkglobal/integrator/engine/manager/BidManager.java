@@ -400,15 +400,10 @@ public class BidManager {
     } catch (Exception failure) {
       LogManager.getLogger(LogType.ROOT).warn("Primary BID timer unavailable; fallback deadline armed: " + key);
     }
-    incoming.setOriginalChannel(incoming.getBeforeExchange().getProperty(
-        "MCA_BID_ORIGINAL_CHANNEL", io.netty.channel.Channel.class));
-    if (incoming.getOriginalChannel() != null) {
-      incoming.setCloseListener(future -> bidTimeout(key, incoming));
-      incoming.getOriginalChannel().closeFuture().addListener(incoming.getCloseListener());
-      if (incoming.getContinuationCompleted().get()) {
-        incoming.getOriginalChannel().closeFuture().removeListener(incoming.getCloseListener());
-      }
-    }
+    // Inbound channel close deliberately does NOT end the ticket (office
+    // baseline semantics): it keeps waiting for the release or the deadline, so
+    // a release arriving after the client disconnected is still DELIVERED
+    // instead of being reported as a BID timeout + "bidInfo is null".
     return false;
   }
 
@@ -426,9 +421,6 @@ public class BidManager {
     }
     if (info.getFallbackDeadline() != null) {
       info.getFallbackDeadline().cancel(false);
-    }
-    if (info.getOriginalChannel() != null && info.getCloseListener() != null) {
-      info.getOriginalChannel().closeFuture().removeListener(info.getCloseListener());
     }
     try {
       if (info.getAsyncMdc() == null) {
