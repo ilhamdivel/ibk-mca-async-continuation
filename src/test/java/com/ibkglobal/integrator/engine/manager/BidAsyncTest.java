@@ -68,6 +68,57 @@ public class BidAsyncTest {
     }
 
     @Test
+    public void releaseDuringRegistrationInRealCamelPipeline() throws Exception {
+        // The release lands while bidStartAsync is still arming its timers, i.e. callback.done(false)
+        // runs BEFORE process() has returned false. Camel 2.21.1 must still route downstream once.
+        BidManager manager = new BidManager();
+        manager.ibkTimeoutBid = mock(IBKTimeout.class);
+        DefaultCamelContext context = new DefaultCamelContext();
+        doAnswer(invocation -> { manager.bidResult("race", new DefaultExchange(context)); return null; })
+            .when(manager.ibkTimeoutBid).put(anyString(), any(BidInfo.class), anyLong());
+        AtomicInteger downstream = new AtomicInteger();
+        org.apache.camel.AsyncProcessor suspend = new org.apache.camel.AsyncProcessor() {
+            public void process(Exchange exchange) throws Exception {
+                org.apache.camel.util.AsyncProcessorHelper.process(this, exchange);
+            }
+            public boolean process(Exchange exchange, org.apache.camel.AsyncCallback callback) {
+                BidInfo ticket = new BidInfo();
+                ticket.setName("race");
+                ticket.setBeforeExchange(exchange);
+                try {
+                    return manager.bidStartAsync(ticket, callback);
+                } catch (Exception failure) {
+                    exchange.setException(failure);
+                    callback.done(true);
+                    return true;
+                }
+            }
+        };
+        context.addRoutes(new org.apache.camel.builder.RouteBuilder() {
+            public void configure() {
+                from("direct:race").process(suspend).process(exchange -> downstream.incrementAndGet());
+            }
+        });
+        context.start();
+        org.apache.camel.Producer producer = context.getEndpoint("direct:race").createProducer();
+        producer.start();
+        try {
+            AtomicInteger completions = new AtomicInteger();
+            Exchange exchange = new DefaultExchange(context);
+            org.apache.camel.util.AsyncProcessorConverterHelper.convert(producer)
+                .process(exchange, sync -> completions.incrementAndGet());
+            assertEquals(1, downstream.get());
+            assertEquals(1, completions.get());
+            assertNull(exchange.getException());
+            assertTrue(manager.getBidInfoList().isEmpty());
+        } finally {
+            producer.stop();
+            context.stop();
+            manager.shutdownAsync();
+        }
+    }
+
+    @Test
     public void concurrentReleaseAndTimeoutCompleteOnce() throws Exception {
         BidManager manager = new BidManager();
         manager.ibkTimeoutBid = mock(IBKTimeout.class);
