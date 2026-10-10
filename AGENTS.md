@@ -5,7 +5,7 @@ Private Java 8 / Camel 2.21.1 office-source baseline and isolated BID continuati
 
 ## Commands
 - Build: `mvn test` (requires internal dependencies).
-- Offline verification: see `tests/README.md` once the harness is available.
+- Offline verification: `mvn -o test` (needs the Surefire JUnit4 provider 2.18.1 cached), or JUnitCore over every `*Test` class in `src/test/java/com/ibkglobal/integrator/engine/manager` (expected 34). Without internal artifacts see `docs/AUDIT_REPORT_BID_CONTINUATION.md` section 10.
 
 ## Conventions
 Preserve existing route order and CRLF Java endings. New code and documentation use English.
@@ -30,3 +30,5 @@ Preserve existing error codes and complete continuations once only.
 - Callback on a different JVM: outside async scope.
 - Channel closed: keep the ticket until the release or the 100 s deadline (office baseline); never write a second response.
 - Overload, stopping or deadline-arm failure after a dummy ack: answer as BID timeout (01002), never a hard MCA_BID error.
+- Never take the primary IBKTimeout lock before answering or releasing a permit; primary put/remove run on `mca-bid-timer`.
+- Shutdown drains each ticket in isolation and is bounded (`shutdownDrainMillis`); timeout answers run on `mca-bid-completion` (`integrator.config.bid-completion-threads`).

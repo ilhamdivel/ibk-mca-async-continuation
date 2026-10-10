@@ -387,8 +387,8 @@ public class BidManager {
   /**
    * Workers that run timeout answers (integrator.config.bid-completion-threads,
    * default 8). A timeout answer starts later than its deadline only while this
-   * many timeout continuations are already running; see timeoutLagMs in the
-   * stats line. Startup only.
+   * many timeout continuations are already running; see maxTimeoutLagMs /
+   * lastTimeoutLagMs in the stats line. Startup only.
    */
   @org.springframework.beans.factory.annotation.Value("${integrator.config.bid-completion-threads:8}")
   public void setCompletionThreads(int threads) {

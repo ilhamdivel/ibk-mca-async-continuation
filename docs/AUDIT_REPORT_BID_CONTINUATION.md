@@ -1,5 +1,7 @@
 # Audit Report: MCA BID Async Continuation
 
+> **Historical document: state at `ec28074`.** A later re-audit ([`REAUDIT_REPORT_GPT_ec28074.md`](REAUDIT_REPORT_GPT_ec28074.md)) found R1–R3; they are fixed and the current state, tests (34) and commands are in [`REAUDIT_RESPONSE.md`](REAUDIT_RESPONSE.md). Line numbers below refer to `ec28074`.
+
 | Item | Value |
 |---|---|
 | Date | 2026-10-10 |

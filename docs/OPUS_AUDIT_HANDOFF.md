@@ -2,7 +2,9 @@
 
 ## Audit Follow-up (2026-10-10, branch `audit-fixes`)
 
-Full report with evidence, reproduction steps and a re-audit checklist: [`AUDIT_REPORT_BID_CONTINUATION.md`](AUDIT_REPORT_BID_CONTINUATION.md).
+Full report with evidence, reproduction steps and a re-audit checklist: [`AUDIT_REPORT_BID_CONTINUATION.md`](AUDIT_REPORT_BID_CONTINUATION.md) (state at `ec28074`).
+
+**Current state:** [`REAUDIT_RESPONSE.md`](REAUDIT_RESPONSE.md) (re-audit R1–R3 fixed, 34 tests, new properties and metrics).
 
 Independent audit of `95649d8` against `office-baseline`. Verdict: **not production-ready as delivered**. The state machine held up (no double completion, lost ticket or lock-held callback found), but the main scope claim was wrong for the deployed topology and three new behaviours needed decisions. This branch applies the decisions, one commit per finding.
 
@@ -61,7 +63,17 @@ The candidate passed 10 JUnit tests under Java 8, Camel 2.21.1 and the cached of
 - `MCABidHandle.java:98` still calls `CompletableFuture.get(60000, ...)` for the separate BID type-5 outbound notification path. It is outside the dummy-ACK continuation path and remains a separate performance workstream; this patch does not claim to remove every blocking wait in MCA.
 - The archived project excludes active runtime route resources from this sanitized repository. Full `MCAInbound`/database-cache route verification and office endpoint regression require the office checkout/configuration.
 
-### Reproduce current local verification
+### Reproduce verification
+
+Current (all test classes):
+
+```bash
+JAVA_HOME=<jdk8> mvn -o test   # needs the Surefire JUnit4 provider 2.18.1 in the local Maven cache
+```
+
+or run every `*Test` class under `src/test/java/com/ibkglobal/integrator/engine/manager` with `org.junit.runner.JUnitCore` (see `REAUDIT_RESPONSE.md` section 8). Expected: 34 tests, 0 failures.
+
+Historical command of the original candidate (two classes only, kept for the record):
 
 ```bash
 JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64 mvn -o test-compile -q
