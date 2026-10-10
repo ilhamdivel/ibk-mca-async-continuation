@@ -34,7 +34,11 @@ public class BidNettyTest {
         context.addRoutes(new RouteBuilder() {
             public void configure() {
                 from("netty4-http:http://127.0.0.1:" + port + "/proof")
-                    .process(exchange -> exchange.getIn().setBody(message))
+                    .process(exchange -> {
+                        exchange.getIn().setBody(message);
+                        // as BidSafeHttpClientChannelHandler marks the GCB reply
+                        exchange.setProperty(BidManager.BID_SAFE_REPLY, Boolean.TRUE);
+                    })
                     .process(processor)
                     .process(exchange -> exchange.getIn().setHeader(Exchange.CONTENT_TYPE, "text/plain"));
             }

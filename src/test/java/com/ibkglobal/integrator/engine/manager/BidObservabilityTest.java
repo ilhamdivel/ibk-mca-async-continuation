@@ -76,6 +76,7 @@ public class BidObservabilityTest {
         when(message.getInterfaceId()).thenReturn("GITO00008290");
         Exchange exchange = new DefaultExchange(context);
         exchange.getIn().setBody(message);
+        exchange.setProperty(BidManager.BID_SAFE_REPLY, Boolean.TRUE);   // GCB reply
         assertFalse(new MCAWorkAfterAsync(manager).process(exchange, sync -> { }));
         assertTrue(messages().contains("MCAWorkAfterProcess dummyCheck InterfaceID: GITO00008290"));
     }

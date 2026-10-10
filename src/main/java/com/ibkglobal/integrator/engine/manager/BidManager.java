@@ -62,6 +62,17 @@ public class BidManager {
   public static final String BID_CONTINUATION = "MCA_BID_CONTINUATION";
 
   /**
+   * Exchange property set by BidSafeHttpClientChannelHandler on every exchange
+   * whose reply it delivers (the GCB adapter-out, built by EndpointCreate with
+   * ibkHttpProducerInitializer). Only such a dummy ack is suspended
+   * (bidStartAsync). A dummy ack that arrives any other way (the LOCAL
+   * adapter-out on Camel's default netty4-http client, a TCP adapter-out, ...)
+   * keeps the office blocking wait (bidStartOfficeWait): Camel 2.21.1 would call
+   * that producer's callback a second time while the exchange is suspended.
+   */
+  public static final String BID_SAFE_REPLY = "MCA_BID_SAFE_REPLY";
+
+  /**
    * Release outcome, so each caller can keep its own "no BID found" policy.
    */
   public static enum ReleaseResult {
@@ -166,6 +177,15 @@ public class BidManager {
       // Drops a timer that was put after a release already completed us.
       ibkTimeoutBid.remove(key);
     }
+  }
+
+  /**
+   * Office blocking wait (bidStart) for a dummy ack that was not delivered by
+   * BidSafeHttpClientChannelHandler (see BID_SAFE_REPLY). Counted as officeWaits.
+   */
+  public void bidStartOfficeWait(BidInfo bidInfo) throws Exception {
+    officeWaits.incrementAndGet();
+    bidStart(bidInfo);
   }
 
   /**
@@ -501,6 +521,7 @@ public class BidManager {
   private final AtomicLong maxTimeoutLagMillis = new AtomicLong();
   private final AtomicLong lastResumeLagMillis = new AtomicLong();
   private final AtomicLong maxResumeLagMillis = new AtomicLong();
+  private final AtomicLong officeWaits = new AtomicLong();
   private volatile String lastLoggedCounters = "";
 
   private volatile ThreadPoolExecutor timerMaintenance = newTimerMaintenance(DEFAULT_ASYNC_CAPACITY);
@@ -534,7 +555,8 @@ public class BidManager {
         + ", notAccepted=" + asyncNotAccepted.get() + ", duplicate=" + asyncDuplicate.get()
         + ", timerTasksDropped=" + timerTasksDropped.get() + ", releaseNotFound=" + releaseNotFound.get()
         + ", primaryTimeouts=" + primaryTimeouts.get() + ", fallbackTimeouts=" + fallbackTimeouts.get()
-        + ", maxTimeoutLagMs=" + maxTimeoutLagMillis.get() + ", maxResumeLagMs=" + maxResumeLagMillis.get();
+        + ", maxTimeoutLagMs=" + maxTimeoutLagMillis.get() + ", maxResumeLagMs=" + maxResumeLagMillis.get()
+        + ", officeWaits=" + officeWaits.get();
   }
 
   /** Release resumes queued but not yet started (resume workers busy). */

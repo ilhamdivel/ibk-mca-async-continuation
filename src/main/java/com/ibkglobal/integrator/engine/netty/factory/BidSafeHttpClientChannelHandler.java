@@ -29,6 +29,10 @@ import io.netty.channel.ChannelHandlerContext;
  * delivered on this channel AND the exchange entered the BID continuation
  * (BidManager.BID_CONTINUATION). In every other case Camel's behaviour is
  * unchanged.
+ *
+ * Every exchange whose reply this handler delivers is marked
+ * BidManager.BID_SAFE_REPLY; MCAWorkAfterAsync suspends only those. A dummy ack
+ * received through any other producer keeps the office blocking wait.
  */
 public class BidSafeHttpClientChannelHandler extends HttpClientChannelHandler {
 
@@ -44,7 +48,11 @@ public class BidSafeHttpClientChannelHandler extends HttpClientChannelHandler {
 
   @Override
   protected void channelRead0(ChannelHandlerContext ctx, Object msg) throws Exception {
-    answered = producer.getCorrelationManager().getState(ctx, ctx.channel(), msg);
+    NettyCamelState state = producer.getCorrelationManager().getState(ctx, ctx.channel(), msg);
+    answered = state;
+    if (state != null && state.getExchange() != null) {
+      state.getExchange().setProperty(BidManager.BID_SAFE_REPLY, Boolean.TRUE);
+    }
     super.channelRead0(ctx, msg);
   }
 

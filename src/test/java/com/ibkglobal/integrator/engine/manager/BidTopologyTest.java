@@ -20,11 +20,13 @@ import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.component.netty4.http.NettyHttpComponent;
 import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.camel.impl.DefaultExchange;
+import org.apache.camel.impl.SimpleRegistry;
 import org.junit.Test;
 
 import com.ibkglobal.integrator.config.CamelConfig;
 import com.ibkglobal.integrator.engine.bean.mca.work.MCAGcbComBean;
 import com.ibkglobal.integrator.engine.bean.mca.work.MCAWorkAfterAsync;
+import com.ibkglobal.integrator.engine.netty.factory.IBKHttpProducerInitializer;
 import com.ibkglobal.integrator.engine.timer.IBKTimeout;
 import com.ibkglobal.message.IBKMessage;
 import com.ibkglobal.message.common.normal.StandardTelegram;
@@ -71,6 +73,13 @@ public class BidTopologyTest {
         return bean;
     }
 
+    /** The GCB adapter-out producer initializer (EndpointCreate.createHttp), registered as NettyBean does. */
+    private static SimpleRegistry gcbRegistry() {
+        SimpleRegistry registry = new SimpleRegistry();
+        registry.put("ibkHttpProducerInitializer", new IBKHttpProducerInitializer());
+        return registry;
+    }
+
     private static String get(int port, String auditHeader) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL("http://127.0.0.1:" + port + "/httpin").openConnection();
         connection.setReadTimeout(20000);
@@ -93,7 +102,7 @@ public class BidTopologyTest {
 
     private static final class Scenario implements AutoCloseable {
         final BidManager manager = new BidManager();
-        final DefaultCamelContext context = new DefaultCamelContext();
+        final DefaultCamelContext context = new DefaultCamelContext(gcbRegistry());
         final ExecutorService clients = Executors.newCachedThreadPool();
         final int inPort;
         Future<String> original;
@@ -134,7 +143,8 @@ public class BidTopologyTest {
                             .removeHeaders("*")
                             .setBody(constant("request"))
                             .setHeader(Exchange.HTTP_METHOD, constant("POST"))
-                            .to("netty4-http:http://127.0.0.1:" + gcbPort + "/service/sync")
+                            .to("netty4-http:http://127.0.0.1:" + gcbPort
+                                + "/service/sync?clientInitializerFactory=#ibkHttpProducerInitializer")
                             .process(e -> e.getIn().setBody(message("4")))
                             .process(after)
                         .end();
