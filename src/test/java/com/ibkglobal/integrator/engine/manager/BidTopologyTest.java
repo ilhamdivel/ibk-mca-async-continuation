@@ -178,6 +178,28 @@ public class BidTopologyTest {
     }
 
     @Test
+    public void prodBridgeStarvesAnHttpReleasePinnedToTheParkedExecutor() throws Exception {
+        // Known limitation (phase 2), reproduced through real HTTP: with one Adapter-In executor the
+        // release connection is pinned to the thread parked in MCAGcbComBean's ProducerTemplate bridge.
+        try (Scenario scenario = new Scenario(true, 1)) {
+            scenario.sendOriginalAndWaitForDummy();
+            Future<String> release = scenario.clients.submit(() -> get(scenario.inPort, "release"));
+            try {
+                release.get(2, TimeUnit.SECONDS);
+                fail("release must be starved while its pinned executor is parked in the bridge");
+            } catch (java.util.concurrent.TimeoutException expected) { }
+            assertEquals(1, scenario.manager.getAsyncPendingCount());
+            // Only another path (here: a direct release) unparks the executor ...
+            Exchange direct = new DefaultExchange(scenario.context);
+            direct.getIn().setBody("final-response");
+            assertEquals(BidManager.ReleaseResult.DELIVERED, scenario.manager.bidResult(KEY, direct));
+            assertEquals("final-response", scenario.original.get(10, TimeUnit.SECONDS));
+            // ... and only then is the starved HTTP release served, too late to find its ticket.
+            assertEquals("release:NOT_FOUND", release.get(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     public void directAdapterInFreesTheOnlyExecutorSoReleaseIsServed() throws Exception {
         try (Scenario scenario = new Scenario(false, 1)) {
             scenario.sendOriginalAndWaitForDummy();
