@@ -1,7 +1,11 @@
 package com.ibkglobal.integrator.engine.model;
 
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.apache.camel.AsyncCallback;
 import org.apache.camel.Exchange;
 
 import lombok.Data;
@@ -20,7 +24,7 @@ public class BidInfo {
 
   private final CompletableFuture<Void> future = new CompletableFuture<>();
 
-  private org.apache.camel.AsyncCallback asyncCallback;
+  private AsyncCallback asyncCallback;
   private long deadlineNanos;
   // volatile: armed by the dummy-ack thread AFTER the ticket is visible in
   // bidInfoList and read by whichever thread completes it. Together with
@@ -29,13 +33,11 @@ public class BidInfo {
   // the timer while the arming thread misses the completion, and the 100 ms
   // fallback task would never be cancelled.
   private volatile String asyncTimerKey;
-  private final java.util.concurrent.atomic.AtomicBoolean timeoutQueued =
-      new java.util.concurrent.atomic.AtomicBoolean(false);
-  private volatile java.util.concurrent.ScheduledFuture<?> fallbackDeadline;
+  private final AtomicBoolean timeoutQueued = new AtomicBoolean(false);
+  private volatile ScheduledFuture<?> fallbackDeadline;
   private boolean asyncPermitOwned;
-  private java.util.Map<String, String> asyncMdc;
-  private final java.util.concurrent.atomic.AtomicBoolean continuationCompleted =
-      new java.util.concurrent.atomic.AtomicBoolean(false);
+  private Map<String, String> asyncMdc;
+  private final AtomicBoolean continuationCompleted = new AtomicBoolean(false);
 
   // PENDING :pre-registered before the request is sent, dummy ack not yet
   // received

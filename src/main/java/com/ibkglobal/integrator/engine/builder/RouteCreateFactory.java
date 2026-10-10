@@ -1,9 +1,11 @@
 package com.ibkglobal.integrator.engine.builder;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import com.ibk.ibkglobal.data.integrator.route.RouteCreateInfo;
 import com.ibk.ibkglobal.data.integrator.route.type.RouteType;
+import com.ibkglobal.integrator.engine.bean.mca.work.MCAWorkAfterAsync;
 import com.ibkglobal.integrator.engine.builder.route.RouteCreate;
 import com.ibkglobal.integrator.engine.builder.route.mca.MCADefaultAdapterIn;
 import com.ibkglobal.integrator.engine.builder.route.mca.MCADefaultAdapterOut;
@@ -16,8 +18,8 @@ import com.ibkglobal.integrator.engine.builder.route.mca.bid.MCABidProcess;
 @Component
 public class RouteCreateFactory {
 
-  @org.springframework.beans.factory.annotation.Autowired
-  private com.ibkglobal.integrator.engine.bean.mca.work.MCAWorkAfterAsync mcaWorkAfterAsync;
+  @Autowired
+  private MCAWorkAfterAsync mcaWorkAfterAsync;
 
   public RouteCreate getCreate(RouteCreateInfo builderInfo) {
 

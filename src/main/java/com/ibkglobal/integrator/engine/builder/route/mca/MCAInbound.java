@@ -1,17 +1,19 @@
 package com.ibkglobal.integrator.engine.builder.route.mca;
 
+import org.apache.camel.AsyncProcessor;
+
 import com.ibk.ibkglobal.data.integrator.route.RouteCreateInfo;
 import com.ibkglobal.integrator.engine.builder.route.RouteCreateDefault;
 
 public class MCAInbound extends RouteCreateDefault {
 	
-	private final org.apache.camel.AsyncProcessor afterProcessor;
+	private final AsyncProcessor afterProcessor;
 
-	public MCAInbound(RouteCreateInfo builderInfo, org.apache.camel.AsyncProcessor afterProcessor) {
-        if (afterProcessor == null) {
-            throw new IllegalArgumentException("BID async processor is required");
-        }
-        this.afterProcessor = afterProcessor;
+	public MCAInbound(RouteCreateInfo builderInfo, AsyncProcessor afterProcessor) {
+		if (afterProcessor == null) {
+			throw new IllegalArgumentException("BID async processor is required");
+		}
+		this.afterProcessor = afterProcessor;
 		super.setBuilderInfo(builderInfo);
 		onMCAException();
 		create();

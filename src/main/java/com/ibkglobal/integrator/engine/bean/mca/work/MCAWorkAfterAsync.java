@@ -1,12 +1,17 @@
 package com.ibkglobal.integrator.engine.bean.mca.work;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import org.apache.camel.AsyncProcessor;
 import org.apache.camel.Exchange;
 import org.apache.camel.AsyncCallback;
+import org.apache.camel.util.AsyncProcessorHelper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import com.ibkglobal.integrator.engine.manager.BidManager;
 import com.ibkglobal.integrator.util.BidUtil;
+import com.ibkglobal.log.LogManager;
+import com.ibkglobal.log.LogType;
 import com.ibkglobal.message.IBKMessage;
 import com.ibkglobal.message.common.normal.StandardTelegram;
 
@@ -23,12 +28,12 @@ public class MCAWorkAfterAsync implements AsyncProcessor {
 
     @Override
     public void process(Exchange exchange) throws Exception {
-        org.apache.camel.util.AsyncProcessorHelper.process(this, exchange);
+        AsyncProcessorHelper.process(this, exchange);
     }
 
     @Override
     public boolean process(Exchange exchange, AsyncCallback callback) {
-        java.util.concurrent.atomic.AtomicBoolean completed = new java.util.concurrent.atomic.AtomicBoolean();
+        AtomicBoolean completed = new AtomicBoolean();
         AsyncCallback guarded = doneSync -> {
             if (completed.compareAndSet(false, true)) {
                 callback.done(doneSync);
@@ -40,7 +45,7 @@ public class MCAWorkAfterAsync implements AsyncProcessor {
             if (telegram != null && "4".equals(telegram.getSttlSysCopt().getOtptTmgtDcd())) {
                 // Same text as the office MCAWorkAfterProcess line: operations grep for it
                 // to find dummy acks (N4) during BID root-cause analysis.
-                com.ibkglobal.log.LogManager.getLogger(com.ibkglobal.log.LogType.ROOT)
+                LogManager.getLogger(LogType.ROOT)
                     .info("MCAWorkAfterProcess dummyCheck InterfaceID: " + message.getInterfaceId());
                 return bidManager.bidStartAsync(BidUtil.bidCreate(exchange, telegram), guarded);
             }
