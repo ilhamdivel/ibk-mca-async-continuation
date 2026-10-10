@@ -25,10 +25,14 @@ public class BidCapacityConfigTest {
     }
 
     private BidManager start(AnnotationConfigApplicationContext context, String capacity) {
-        if (capacity != null) {
-            context.getEnvironment().getPropertySources().addFirst(new MapPropertySource("test",
-                Collections.<String, Object>singletonMap("integrator.config.bid-async-capacity", capacity)));
-        }
+        return start(context, capacity, null);
+    }
+
+    private BidManager start(AnnotationConfigApplicationContext context, String capacity, String threads) {
+        java.util.Map<String, Object> properties = new java.util.HashMap<>();
+        if (capacity != null) properties.put("integrator.config.bid-async-capacity", capacity);
+        if (threads != null) properties.put("integrator.config.bid-completion-threads", threads);
+        context.getEnvironment().getPropertySources().addFirst(new MapPropertySource("test", properties));
         // registerSingleton: the mock is not post-processed, so its inherited @Autowired fields stay empty.
         context.getBeanFactory().registerSingleton("ibkTimeoutBid", mock(IBKTimeout.class));
         context.register(Placeholders.class, BidManager.class);
@@ -40,7 +44,19 @@ public class BidCapacityConfigTest {
     public void defaultsTo512WhenPropertyIsAbsent() {
         AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext();
         try {
-            assertEquals(512, start(context, null).getAsyncCapacityLimit());
+            BidManager manager = start(context, null);
+            assertEquals(512, manager.getAsyncCapacityLimit());
+            assertEquals(8, manager.getCompletionThreads());
+        } finally { context.close(); }
+    }
+
+    @Test
+    public void readsIntegratorConfigBidCompletionThreads() {
+        AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext();
+        try {
+            BidManager manager = start(context, "64", "3");
+            assertEquals(64, manager.getAsyncCapacityLimit());
+            assertEquals(3, manager.getCompletionThreads());
         } finally { context.close(); }
     }
 

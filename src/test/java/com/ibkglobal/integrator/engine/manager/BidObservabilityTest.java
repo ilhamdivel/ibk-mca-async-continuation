@@ -131,6 +131,9 @@ public class BidObservabilityTest {
         String stats = manager.getAsyncStats();
         assertTrue(stats, stats.startsWith("pending=0/2, oldestPendingMs=0"));
         assertTrue(stats, stats.contains("suspended=2, delivered=1, earlyRelease=0, timedOut=1, notAccepted=1, duplicate=1"));
+        assertTrue(stats, stats.contains("primaryTimeouts=1, fallbackTimeouts=0"));
+        assertEquals(BidManager.ReleaseResult.NOT_FOUND, manager.bidResult("slow", new DefaultExchange(context)));
+        assertTrue(manager.getAsyncStats().contains("releaseNotFound=1"));
         assertTrue(messages().contains("Bid Timeout : slow"));
     }
 }
