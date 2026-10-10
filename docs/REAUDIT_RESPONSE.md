@@ -225,7 +225,7 @@ java -cp "target/classes:target/test-classes:<test classpath>" org.junit.runner.
   com.ibkglobal.integrator.engine.manager.BidReleaseIsolationTest
 ```
 
-Responder's environment: the offline harness from `AUDIT_REPORT_BID_CONTINUATION.md` section 10 (JDK 8, real Camel 2.21.1 / Netty 4.1.22, Spring 5.3 / Mockito 4 substitutes, three stubbed internal types). Each commit passed 3 consecutive runs before it was made; `819bdb9` passed 10 of 10 consecutive runs (`OK (34 tests)`), and `dbef4c3` passed **10 of 10 consecutive runs, `OK (36 tests)`** each.
+Responder's environment: the offline harness from `AUDIT_REPORT_BID_CONTINUATION.md` section 10 (JDK 8, real Camel 2.21.1 / Netty 4.1.22, Spring 5.3 / Mockito 4 substitutes, stubbed internal types `InstanceType`, `ConverterService`, `ActiveMQConnectionFactory`, and, since `dbef4c3` (the real `MCABidHandle` is now exercised), `com.ibkglobal.message.converter.ConverterByte` with only `public static String fieldStringFormat(String type, Object value, int defaultLength, int scale)`, placed in the stub directory that precedes the message module on the source path). Each commit passed 3 consecutive runs before it was made; `819bdb9` passed 10 of 10 consecutive runs (`OK (34 tests)`), and `dbef4c3` passed **10 of 10 consecutive runs, `OK (36 tests)`** each.
 
 The re-audit's native run (Spring 4.3.14, Mockito 1.10.19, cached `ibkglobal-message`) was on `ec28074`. **A native `mvn -o test` on this HEAD is still required.** All new tests use Mockito 1.10-compatible APIs only (`timeout()`, `doAnswer`, `RETURNS_DEEP_STUBS`, `verifyZeroInteractions`).
 
