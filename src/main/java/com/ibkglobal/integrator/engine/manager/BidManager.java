@@ -151,7 +151,8 @@ public class BidManager {
         return;
       }
       try {
-        timeoutCompletion.execute(() -> expireTicket(expected.getName(), expected));
+        timeoutCompletion.execute(() -> runIsolated("BID timeout completion", expected.getName(),
+            () -> expireTicket(expected.getName(), expected)));
       } catch (java.util.concurrent.RejectedExecutionException failure) {
         expected.getTimeoutQueued().set(false);
         LogManager.getLogger(LogType.ROOT).error("BID timeout completion rejected: " + expected.getName(), failure);
@@ -483,9 +484,15 @@ public class BidManager {
     }
     try {
       incoming.setFallbackDeadline(deadlineWatchdog.scheduleWithFixedDelay(() -> {
-        if (bidInfoList.get(key) == incoming
-            && System.nanoTime() - incoming.getDeadlineNanos() >= 0) {
-          bidTimeout(key, incoming);
+        // Never let this throw: a periodic task that throws is silently cancelled
+        // and the ticket would lose its independent deadline.
+        try {
+          if (bidInfoList.get(key) == incoming
+              && System.nanoTime() - incoming.getDeadlineNanos() >= 0) {
+            bidTimeout(key, incoming);
+          }
+        } catch (Throwable failure) {
+          LogManager.getLogger(LogType.ROOT).error("BID fallback deadline check failed : " + key, failure);
         }
       }, incoming.getDefaultTimeOut(), 100L, java.util.concurrent.TimeUnit.MILLISECONDS));
       if (incoming.getContinuationCompleted().get()) {
@@ -573,17 +580,74 @@ public class BidManager {
     }
   }
 
+  /**
+   * Runs one ticket's completion so that its failure is logged and cannot stop
+   * the caller from serving other tickets (shutdown drain, completion workers).
+   * Errors are logged and rethrown.
+   */
+  private void runIsolated(String what, String key, Runnable task) {
+    try {
+      task.run();
+    } catch (RuntimeException failure) {
+      LogManager.getLogger(LogType.ROOT).error(what + " failed : " + key, failure);
+    } catch (Error failure) {
+      LogManager.getLogger(LogType.ROOT).error(what + " failed : " + key, failure);
+      throw failure;
+    }
+  }
+
+  private static java.util.concurrent.ThreadFactory daemonThreads(String name) {
+    return r -> {
+      Thread thread = new Thread(r, name);
+      thread.setDaemon(true);
+      return thread;
+    };
+  }
+
+  static final int SHUTDOWN_DRAIN_THREADS = 4;
+
+  /** Upper bound (ms) that shutdownAsync waits for suspended continuations to be answered. */
+  long shutdownDrainMillis = 10000L;
+
+  /**
+   * Answers every still-suspended continuation as a BID timeout, each in
+   * isolation (one failing or hanging callback cannot stop the others), waits
+   * at most shutdownDrainMillis, and always stops the owned executors.
+   */
   @javax.annotation.PreDestroy
   public void shutdownAsync() {
     synchronized (asyncLifecycle) {
       asyncStopping = true;
     }
-    deadlineWatchdog.shutdown();
-    for (Map.Entry<String, BidInfo> entry : bidInfoList.entrySet()) {
-      if (entry.getValue().getAsyncCallback() != null) {
-        expireTicket(entry.getKey(), entry.getValue());
+    java.util.concurrent.ExecutorService drain = null;
+    try {
+      deadlineWatchdog.shutdown();
+      java.util.List<BidInfo> pending = new java.util.ArrayList<>();
+      for (BidInfo info : bidInfoList.values()) {
+        if (info.getAsyncCallback() != null) {
+          pending.add(info);
+        }
       }
+      if (!pending.isEmpty()) {
+        drain = java.util.concurrent.Executors.newFixedThreadPool(
+            Math.min(pending.size(), SHUTDOWN_DRAIN_THREADS), daemonThreads("mca-bid-shutdown"));
+        for (BidInfo info : pending) {
+          drain.execute(() -> runIsolated("BID shutdown expiry", info.getName(),
+              () -> expireTicket(info.getName(), info)));
+        }
+        drain.shutdown();
+        if (!drain.awaitTermination(shutdownDrainMillis, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+          LogManager.getLogger(LogType.ROOT).warn("BID shutdown drain exceeded " + shutdownDrainMillis
+              + " ms, continuations still pending : " + getAsyncPendingCount());
+        }
+      }
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+    } finally {
+      if (drain != null) {
+        drain.shutdownNow();
+      }
+      timeoutCompletion.shutdown();
     }
-    timeoutCompletion.shutdown();
   }
 }

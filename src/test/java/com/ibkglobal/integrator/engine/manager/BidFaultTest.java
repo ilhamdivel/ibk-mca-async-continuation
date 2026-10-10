@@ -142,6 +142,64 @@ public class BidFaultTest {
         } finally { manager.shutdownAsync(); }
     }
 
+    static boolean ownedExecutorsStopped(BidManager manager) throws Exception {
+        boolean found = false;
+        for (java.lang.reflect.Field field : BidManager.class.getDeclaredFields()) {
+            if (ExecutorService.class.isAssignableFrom(field.getType())) {
+                field.setAccessible(true);
+                found = true;
+                if (!((ExecutorService) field.get(manager)).isShutdown()) return false;
+            }
+        }
+        return found;
+    }
+
+    @Test public void shutdownIsolatesFailingCallbacksAndDrainsEveryTicket() throws Exception {
+        // Re-audit R1: one throwing continuation used to abort the shutdown loop, leaving the
+        // other tickets suspended, their permits held and the completion executor running.
+        BidManager manager = manager();
+        DefaultCamelContext context = new DefaultCamelContext();
+        AtomicInteger calls = new AtomicInteger();
+        java.util.List<BidInfo> tickets = new java.util.ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            BidInfo ticket = ticket("drain-" + i, context);
+            tickets.add(ticket);
+            assertFalse(manager.bidStartAsync(ticket, sync -> {
+                calls.incrementAndGet();
+                throw new IllegalStateException("Injected continuation failure");
+            }));
+        }
+        manager.shutdownAsync();
+        assertEquals(3, calls.get());
+        assertTrue(manager.getBidInfoList().isEmpty());
+        assertEquals(0, manager.getAsyncPendingCount());
+        for (BidInfo ticket : tickets) {
+            assertEquals(BidInfo.BidStatus.TIMEOUT, ticket.getStatus());
+            assertTrue(ticket.getContinuationCompleted().get());
+            assertTrue(ticket.getFallbackDeadline().isCancelled());
+        }
+        assertTrue(ownedExecutorsStopped(manager));
+    }
+
+    @Test public void shutdownDrainIsBoundedWhenACallbackNeverReturns() throws Exception {
+        BidManager manager = manager();
+        manager.shutdownDrainMillis = 300;
+        DefaultCamelContext context = new DefaultCamelContext();
+        CountDownLatch never = new CountDownLatch(1);
+        AtomicInteger others = new AtomicInteger();
+        manager.bidStartAsync(ticket("hang", context), sync -> {
+            try { never.await(); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        });
+        manager.bidStartAsync(ticket("answered", context), sync -> others.incrementAndGet());
+        long started = System.nanoTime();
+        manager.shutdownAsync();
+        long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        assertTrue("shutdown must be bounded, took " + tookMs + " ms", tookMs < 3000);
+        assertEquals(1, others.get());
+        assertTrue(ownedExecutorsStopped(manager));
+        never.countDown();
+    }
+
     @Test public void registrationAndShutdownRaceLeavesNoWaiter() throws Exception {
         DefaultCamelContext context = new DefaultCamelContext();
         ExecutorService executor = Executors.newFixedThreadPool(2);
