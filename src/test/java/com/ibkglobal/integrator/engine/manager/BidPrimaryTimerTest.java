@@ -55,8 +55,25 @@ public class BidPrimaryTimerTest {
         while (counter.get() < expected && System.nanoTime() < deadline) Thread.sleep(5);
     }
 
+    /**
+     * Waits until mca-bid-timer has run the expected number of primary-timer tasks. Every suspended
+     * ticket produces exactly one arm task (skipped inside if already completed) and one cleanup task,
+     * queued in finishContinuation's finally block, i.e. possibly just after the callback ran.
+     */
+    private static void awaitTimerTasksCompleted(BidManager manager, long expected, long millis) throws Exception {
+        java.lang.reflect.Field field = BidManager.class.getDeclaredField("timerMaintenance");
+        field.setAccessible(true);
+        java.util.concurrent.ThreadPoolExecutor timerThread = (java.util.concurrent.ThreadPoolExecutor) field.get(manager);
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (timerThread.getCompletedTaskCount() < expected && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals("primary-timer tasks completed on mca-bid-timer", expected, timerThread.getCompletedTaskCount());
+    }
+
     @Test
     public void stuckPrimaryTimerLockDelaysNeitherDummyAckNorAnswerNorPermit() throws Exception {
+        java.util.UUID.randomUUID();   // warm up SecureRandom so the timing below measures only the lock
         DefaultCamelContext context = new DefaultCamelContext();
         context.start();   // IBKTimeout.onEviction shuts its executor down when the context is stopped
         BidManager manager = new BidManager();
@@ -108,8 +125,9 @@ public class BidPrimaryTimerTest {
             holder.join(3000);
         }
         // 4. Once the lock is free, the timer thread catches up: no primary entry is left behind.
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-        while (timer.getTimeout().size() > 0 && System.nanoTime() < deadline) Thread.sleep(10);
+        //    (Checking the size right after unlock is racy: a put still waiting for the lock lands
+        //    after the check and its paired remove right after it. Wait for the FIFO thread instead.)
+        awaitTimerTasksCompleted(manager, 4, 3000);   // 2 tickets x (arm + cleanup)
         assertEquals(0, timer.getTimeout().size());
         manager.shutdownAsync();
         timer.stop();
