@@ -5,7 +5,7 @@ Private Java 8 / Camel 2.21.1 office-source baseline and isolated BID continuati
 
 ## Commands
 - Build: `mvn test` (requires internal dependencies).
-- Offline verification: `mvn -o test` (needs the Surefire JUnit4 provider 2.18.1 cached), or JUnitCore over every `*Test` class in `src/test/java/com/ibkglobal/integrator/engine/manager` (expected 36). Without internal artifacts see `docs/AUDIT_REPORT_BID_CONTINUATION.md` section 10.
+- Offline verification: `mvn -o test` (needs the Surefire JUnit4 provider 2.18.1 cached), or JUnitCore over every `*Test` class in `src/test/java/com/ibkglobal/integrator/engine/manager` (expected 40). Without internal artifacts see `docs/AUDIT_REPORT_BID_CONTINUATION.md` section 10.
 
 ## Conventions
 Preserve existing route order and CRLF Java endings. New code and documentation use English.
@@ -32,4 +32,5 @@ Preserve existing error codes and complete continuations once only.
 - Channel closed: keep the ticket until the release or the 100 s deadline (office baseline); never write a second response.
 - Overload, stopping or deadline-arm failure after a dummy ack: answer as BID timeout (01002), never a hard MCA_BID error.
 - Never take the primary IBKTimeout lock before answering or releasing a permit; primary put/remove run on `mca-bid-timer`.
+- Suspend only a dummy ack delivered by `BidSafeHttpClientChannelHandler` (`BID_SAFE_REPLY`, GCB adapter-out). Any other client (LOCAL adapter-out, TCP) keeps the office wait (`officeWaits`): Camel 2.21.1 calls a producer callback twice when the channel closes under a suspended exchange (`docs/REAUDIT_RESPONSE.md` section 4b).
 - Shutdown drains each ticket in isolation and is bounded (`shutdownDrainMillis`); timeout answers run on `mca-bid-completion` (`integrator.config.bid-completion-threads`).

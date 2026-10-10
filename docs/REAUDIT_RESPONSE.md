@@ -5,7 +5,7 @@
 | Date | 2026-10-10 |
 | Re-audit input | [`REAUDIT_REPORT_GPT_ec28074.md`](REAUDIT_REPORT_GPT_ec28074.md) (verbatim copy of the report received) |
 | Revision re-audited | `ec28074` (branch `audit-fixes`) |
-| Response commits | `b7f346d` (R1), `11608eb` (R2), `3dc1cc8` (R3), `94ea233` (bridge HTTP regression), `819bdb9` (docs), `dbef4c3` (scope rule: releasing threads only signal), this documentation commit |
+| Response commits | `b7f346d` (R1), `11608eb` (R2), `3dc1cc8` (R3), `94ea233` (bridge HTTP regression), `819bdb9` (docs), `dbef4c3` (scope rule: releasing threads only signal), `778f15d` (imports instead of fully-qualified names, bytecode-identical), `a1e648d` (deterministic `BidPrimaryTimerTest`), `191eb8f` (second producer callback), `ee6d05d` (office wait outside the GCB adapter-out), `ec14dd6` (mixed-load stress), this documentation commit |
 | Responder | Claude Opus 5.5 (Claude Code), on behalf of IBK Global IT Operation |
 | Historical report | [`AUDIT_REPORT_BID_CONTINUATION.md`](AUDIT_REPORT_BID_CONTINUATION.md) describes the state at `ec28074` and is kept unchanged as history. **This document is the current state.** |
 
@@ -17,6 +17,8 @@
 - The bridge-topology starvation (known scope, phase 2) is now reproducible through real HTTP from the committed tests.
 - The two pre-existing type-5 BID defects are **confirmed but not changed**. They alter business routing of terminal BIDs, which `AGENTS.md` forbids without a business decision (section 6). IBK confirmed: leave them.
 - **Scope rule (IBK, 2026-10-10):** the async change may only stop the dummy ack from holding other transactions; no other flow may change. Checking that rule found one more deviation: the releasing thread (real response, RCV_CONFIRM_BID on the single JMS consumer) ran the waiting transaction's continuation. Fixed in `dbef4c3`; compliance matrix in section 4a.
+- **Mixed-load stress (section 4b)** found a critical defect: with the prod GCB option `disconnect=true`, Camel 2.21.1 called the producer callback a second time for a suspended dummy-ack exchange, and answers crossed between transactions. Fixed in `191eb8f`, with 0 problems since. The same check showed that a dummy ack from the LOCAL adapter-out (Camel's default client) would hit it too, so only replies from the guarded GCB client are now suspended; any other client keeps the office wait (`ee6d05d`).
+- With the deployed bridge, Camel also calls the producer callback twice for **normal** transactions. That is office behaviour, measured and left unchanged under the scope rule (section 4b, decision in section 9).
 - Status: still **not production-approved**. The office acceptance criteria 2–9 of the re-audit and phase 2 remain open (section 9).
 
 ## 2. Claim-by-claim verdict
@@ -113,6 +115,7 @@ The earlier probe of the old code deadlocked instead of failing.
 |---|---|---|---|
 | Normal response (otptTmgtDcd ≠ 4) | `MCAInbound` → `MCAWorkAfterAsync` | Yes: synchronous `done(true)`, no timer/map access, same field reads as `MCAWorkAfterProcess` | `normalResponseRemainsSynchronous` |
 | Local (`sysEnvrInfoDcd = L`) | same | Yes, same as normal | code path identical |
+| Dummy ack from LOCAL / TCP / any client other than the GCB adapter-out | `MCAWorkAfterAsync` → `bidStartOfficeWait` | Yes since `ee6d05d`: office blocking wait (not suspended, see 4b) | `BidSafeReplyTest` |
 | ITRO00000035 BID HTTP | `MCAWorkPreProcess.bidHttp` | Yes: returns before pre-registration and before the after-processor (fault) | unchanged code |
 | Type-5 terminal BID | SEDA → JMS → `MCABidProcess` → `MCABidHandle.bidWork` | Yes, untouched (pre-existing defects left as is) | unchanged code |
 | Type-6 RCV_CONFIRM_BID | `MCABidHandle.bidWorkWait` → `bidResult` | Yes since `dbef4c3`: the consumer only signals | `rcvConfirmBidOnTheSingleJmsConsumerIsNotHeldByTheWaitingTransaction` |
@@ -136,6 +139,78 @@ Known limitation, unchanged (phase 2): with the deployed `MCAGcbComBean` bridge 
 3. The starved HTTP release is then served and finds no ticket (`NOT_FOUND`).
 
 This reproduces the first audit's pool-size-one experiment from committed code.
+
+### 4b. Mixed-load stress and the Camel 2.21.1 second producer callback
+
+`BidStressTest` runs, concurrently and shuffled, many normal (non-BID), dummy-ack (release after the dummy, and release before the dummy) and approval transactions, a third of the approvals followed by a late real response. Defaults: 1200 normal, 600 dummy-ack, 300 approval, 64 clients. It uses the real `MCAWorkAfterAsync`, `BidManager`, `BidUtil`, `MCAGcbComBean`, message classes and Camel 2.21.1 / Netty 4.1.22. The GCB adapter-out uses the prod options from `EndpointCreate`: `clientInitializerFactory=#ibkHttpProducerInitializer&disconnect=true&requestTimeout=90000`, plus the 4 IO workers seen in prod. `MCAWorkPreProcess.bidPreRegister` and the release block of `ProcessPreMCA` are copied verbatim, because their classes need internal Penta/mms artifacts to load. GCB is simulated.
+
+Every client must receive its own answer, every release its expected outcome, and late approvals `bidInfo is null`. Afterwards the ticket map and the permits must be empty, no thread may sit in `BidManager.workWait`, and the counters must show `timedOut=0 notAccepted=0 duplicate=0 officeWaits=0`.
+
+**Defect found by the stress (fixed `191eb8f`).**
+- Symptom: with the prod option `disconnect=true`, **1352 and 1439 of 2100 transactions failed; 1270 and 1353 clients received another transaction's answer.** The same run passed with keep-alive, with normal traffic only, and with the office blocking wait.
+- Cause, in Camel 2.21.1 `ClientChannelHandler`:
+  - Camel keeps the request state (exchange + producer callback) on the channel after the reply.
+  - `channelReadComplete` resets `messageReceived`.
+  - When the channel then closes (always with `disconnect=true`) or fails while the exchange is not done, `channelInactive`/`exceptionCaught` call the producer callback a second time.
+  - A normal exchange is done before that channel event. A suspended dummy-ack exchange is not.
+  - The second callback continues the suspended route with the dummy body and answers the client early with it (`BidSafeReplyTest` on the old code receives the raw dummy `IBKMessage` instead of the real answer). When the release later resumes the continuation, a second answer is written on the same Adapter-In connection. With keep-alive client connections, the next transaction on that connection reads it, which is consistent with the crossed answers measured.
+  - The office blocking wait hides the bug: it parks the IO thread that would deliver the close event.
+- Fix:
+  - `BidSafeHttpClientChannelHandler` (used by `IBKHttpProducerInitializer`) skips the second callback only when the reply for the channel's current state was already delivered **and** the exchange entered the continuation (`BidManager.BID_CONTINUATION`, set at the start of `bidStartAsync`).
+  - It still removes the state and the channel, closes the channel and forwards the event, exactly as Camel does.
+  - Every other exchange takes Camel's code path unchanged.
+- Result: 0 problems in every run since (table below).
+
+**Gap closed (`ee6d05d`): dummy acks from any other producer keep the office wait.** The guard lives only in the GCB adapter-out client, built by `EndpointCreate.createHttp`. Two other paths use a different client:
+- **The LOCAL adapter-out** (`sysEnvrInfoDcd = L`, `MCAWorkPreProcess.localWork`) calls the developer's GCB on `:40610/40603/40600` through Camel's default netty4-http client with `disconnect=true`.
+- **TCP adapter-outs** use `IBKTcpProducerInitializer` with the plain `ClientChannelHandler`.
+
+So a dummy ack from either path would hit the same defect. `BidSafeHttpClientChannelHandler` now marks every exchange whose reply it delivers (`BID_SAFE_REPLY`), and `MCAWorkAfterAsync` suspends only marked exchanges.
+- A dummy ack from any other producer takes the office blocking wait (`bidStartOfficeWait`, counted as `officeWaits` in the stats line).
+- This fails safe: an unknown or future transport loses only the async benefit and never gets crossed answers.
+- `BidSafeReplyTest` proves it through real HTTP with the exact LOCAL options:
+  - on HEAD before the guard, both HTTP tests fail;
+  - with the guard but without the fallback, the LOCAL test fails;
+  - with both, all 3 pass.
+
+**Measured (JDK 8 harness, Windows, one host; client, MCA and fake GCB in one JVM):**
+
+| Run (final code) | Transactions | Normal p50 / p99 | Dummy-ack p50 / p99 | Result |
+|---|---|---|---|---|
+| Default (`BidStressTest` as committed), prod GCB options | 2 100 (1200 / 600 / 300), 64 clients | 47 / 200 ms | 99 / 351 ms | 0 problems, 0 crossed; `officeWaits=0` |
+| Heavy, prod GCB options, 3 runs | 5 250 each (3000 / 1500 / 750), 128 clients | 71 / 641, 52 / 401, 44 / 699 ms | 118 / 1034, 101 / 481, 110 / 1245 ms | 0 problems, 0 crossed in each run |
+| Heavy, GCB keep-alive (no `disconnect`) | 10 500 (6000 / 3000 / 1500), 128 clients | 33 / 373 ms | 80 / 445 ms | 0 problems, 0 crossed |
+| LOCAL client (Camel default, `localWork` options) | 2 100, 64 clients | 75 / 440 ms | 159 / 731 ms | 0 problems, 0 crossed; all 600 dummy acks `officeWaits`, `suspended=0` |
+| Suite (`OK (40 tests)`, includes the default stress) | 3 consecutive runs | | | 3 of 3 passed |
+
+Comparison, office blocking wait (`-Dbid.stress.legacy=true`), same prod options:
+
+| Run | Transactions | Normal p50 / p99 | Wall | Result |
+|---|---|---|---|---|
+| Default, prod GCB options | 2 100 | 156 / 473 ms (async: 47 / 200) | 6.1 s (async: 2.6 s) | 0 problems |
+| 10 500, prod GCB options | 10 500, 128 clients | 30 003 / 30 017 ms: every transaction ran into the 30 s client timeout | 1 388 s | failed |
+| Async, same 10 500, prod GCB options | 10 500, 128 clients | 89 / 454 ms | 45 s | failed only on lost releases (`BindException`, see below) |
+
+These runs show:
+- **The dummy ack no longer holds other transactions.** With the office wait, each pending dummy ack parks one of the 4 GCB IO workers. At 10 500 transactions every normal transaction waited until the 30 s client timeout.
+- The 10 500-transaction runs with `disconnect=true` exhaust the Windows ephemeral ports: 16 384 ports for roughly 24 000 connections in 45 s, failing with `BindException` in both the office and the async run. That is a limit of the test host, not of MCA. The same volume with keep-alive, and 5 250 transactions with `disconnect=true`, pass.
+
+**Pre-existing, not changed (scope rule): second producer callback for normal transactions in the deployed bridge.**
+- The bug: with the deployed `MCAGcbComBean` bridge, the Adapter-In route finishes on the Adapter-In thread, after the GCB channel has already closed. So Camel also calls the producer callback twice for normal transactions.
+- It is office behaviour, not caused by this change. A probe with the office `MCAWorkAfterProcess` and Camel's default client logs `Channel closed but no message received` and releases the response buffer twice, for every single normal transaction.
+- Under load (4000 normal transactions, 128 clients, prod options, bridge):
+
+  | Run | Office (`legacy`): second callbacks | Async: second callbacks |
+  |---|---|---|
+  | 1 | 32 | 30 |
+  | 2 | 126 | 21 |
+
+  All runs were correct.
+- In one mixed bridge run, 2 of 1500 non-BID transactions received their own answer, but unmapped (the raw `IBKMessage` instead of the final body). This is plausibly a side effect of the second callback racing the Adapter-In thread; it was not reproduced in the 4 normal-only runs.
+- At that point the route's pipeline iterators are exhausted, so the second callback normally runs no route step again. It does signal completion a second time (route advices) and releases the GCB response buffer twice.
+- Extending the guard to every answered exchange (drop the `BID_CONTINUATION` condition) would remove it. That changes the normal flow, so it needs IBK's decision; see section 9.
+
+**Bridge self-deadlock, re-measured with prod options (pre-existing, phase 2):** 1 of 600 dummy acks hit the 30 s client timeout. Its release was pinned to its own parked Adapter-In executor. In production it would be answered by the 100 s BID timeout.
 
 ## 5. Threads owned by `BidManager` (current)
 
@@ -189,15 +264,17 @@ Stats line (every 60 s on `mca-bid-deadline`, only when something is pending or 
 ```
 Bid async stats : pending=x/cap, oldestPendingMs=.., suspended=.., delivered=.., earlyRelease=.., timedOut=..,
 notAccepted=.., duplicate=.., timerTasksDropped=.., releaseNotFound=.., primaryTimeouts=.., fallbackTimeouts=..,
-maxTimeoutLagMs=.., maxResumeLagMs=.., lastTimeoutLagMs=.., completionQueue=.., completionActive=x/threads,
+maxTimeoutLagMs=.., maxResumeLagMs=.., officeWaits=.., lastTimeoutLagMs=.., completionQueue=.., completionActive=x/threads,
 lastResumeLagMs=.., resumeQueue=.., resumeActive=x/threads
 ```
+
+`officeWaits` counts dummy acks that kept the office blocking wait because their reply did not come through the GCB adapter-out client (LOCAL, TCP). On a node with only GCB dummy acks it must stay 0; any other value means a dummy ack still holds its IO thread as before.
 
 `delivered` counts the release that won the ticket, not confirmed client receipt (N6 is the closest log evidence; byte-level receipt needs the office test).
 
 ## 8. Verification
 
-Test inventory: **36 tests in 9 classes**, all passing (harness runs listed below).
+Test inventory: **40 tests in 11 classes**, all passing (harness runs listed below).
 
 | Class | Tests |
 |---|---|
@@ -210,6 +287,8 @@ Test inventory: **36 tests in 9 classes**, all passing (harness runs listed belo
 | `BidTopologyTest` | 3 (real `MCAGcbComBean` bridge incl. HTTP starvation, direct wiring) |
 | `BidReleaseIsolationTest` | 2 (scope rule: releasing thread and real `MCABidHandle` RCV_CONFIRM_BID only signal) |
 | `BidNettyTest` | 1 |
+| `BidSafeReplyTest` | 3 (office wait outside the GCB client; LOCAL options and GCB prod options through real HTTP) |
+| `BidStressTest` | 1 (mixed normal / dummy-ack / approval load, prod GCB options; scalable, section 4b) |
 
 Commands:
 
@@ -222,10 +301,12 @@ java -cp "target/classes:target/test-classes:<test classpath>" org.junit.runner.
   com.ibkglobal.integrator.engine.manager.BidCompletionTest com.ibkglobal.integrator.engine.manager.BidPrimaryTimerTest \
   com.ibkglobal.integrator.engine.manager.BidObservabilityTest com.ibkglobal.integrator.engine.manager.BidCapacityConfigTest \
   com.ibkglobal.integrator.engine.manager.BidTopologyTest com.ibkglobal.integrator.engine.manager.BidNettyTest \
-  com.ibkglobal.integrator.engine.manager.BidReleaseIsolationTest
+  com.ibkglobal.integrator.engine.manager.BidReleaseIsolationTest com.ibkglobal.integrator.engine.manager.BidSafeReplyTest \n  com.ibkglobal.integrator.engine.manager.BidStressTest
+# Heavier stress (same test): -Dbid.stress.normal=3000 -Dbid.stress.dummy=1500 -Dbid.stress.approval=750 -Dbid.stress.clients=128
+# Office comparison: -Dbid.stress.legacy=true; deployed bridge: -Dbid.stress.topology=bridge; other GCB options: -Dbid.stress.gcbOptions=...
 ```
 
-Responder's environment: the offline harness from `AUDIT_REPORT_BID_CONTINUATION.md` section 10 (JDK 8, real Camel 2.21.1 / Netty 4.1.22, Spring 5.3 / Mockito 4 substitutes, stubbed internal types `InstanceType`, `ConverterService`, `ActiveMQConnectionFactory`, and, since `dbef4c3` (the real `MCABidHandle` is now exercised), `com.ibkglobal.message.converter.ConverterByte` with only `public static String fieldStringFormat(String type, Object value, int defaultLength, int scale)`, placed in the stub directory that precedes the message module on the source path). Each commit passed 3 consecutive runs before it was made; `819bdb9` passed 10 of 10 consecutive runs (`OK (34 tests)`), and `dbef4c3` passed **10 of 10 consecutive runs, `OK (36 tests)`** each.
+Responder's environment: the offline harness from `AUDIT_REPORT_BID_CONTINUATION.md` section 10 (JDK 8, real Camel 2.21.1 / Netty 4.1.22, Spring 5.3 / Mockito 4 substitutes, stubbed internal types `InstanceType`, `ConverterService`, `ActiveMQConnectionFactory`, and, since `dbef4c3` (the real `MCABidHandle` is now exercised), `com.ibkglobal.message.converter.ConverterByte` with only `public static String fieldStringFormat(String type, Object value, int defaultLength, int scale)`, placed in the stub directory that precedes the message module on the source path). Each commit passed 3 consecutive runs before it was made; `819bdb9` passed 10 of 10 consecutive runs (`OK (34 tests)`), and `dbef4c3` passed **10 of 10 consecutive runs, `OK (36 tests)`** each. Since `ee6d05d` the harness classpath also needs `camel-http-common` 2.21.1 (a compile dependency of `camel-netty4-http`, present in the WAR) and `javax.servlet-api` (provided by JEUS): the LOCAL endpoint option `httpMethodRestrict` makes Camel introspect `NettyHttpEndpoint`, which references `CookieHandler`. The final tree passed 3 of 3 consecutive runs, `OK (40 tests)`.
 
 The re-audit's native run (Spring 4.3.14, Mockito 1.10.19, cached `ibkglobal-message`) was on `ec28074`. **A native `mvn -o test` on this HEAD is still required.** All new tests use Mockito 1.10-compatible APIs only (`timeout()`, `doAnswer`, `RETURNS_DEEP_STUBS`, `verifyZeroInteractions`).
 
@@ -242,6 +323,7 @@ The re-audit's native run (Spring 4.3.14, Mockito 1.10.19, cached `ibkglobal-mes
    - rollback/drain rehearsal.
 3. Office measurement of `maxTimeoutLagMs` under simultaneous timeouts, to set `bid-completion-threads`.
 4. Business decision on the two type-5 BID defects (section 6).
+5. Decision on the pre-existing second producer callback for normal transactions in the deployed bridge (section 4b). Options: extend `BidSafeHttpClientChannelHandler` to every answered exchange (drop the `BID_CONTINUATION` condition), or remove the bridge in phase 2. Either changes the normal flow, so it is not part of this change.
 
 ## 10. Checklist for the next review
 
@@ -250,5 +332,6 @@ The re-audit's native run (Spring 4.3.14, Mockito 1.10.19, cached `ibkglobal-mes
 3. Check the FIFO argument for arm/cleanup on `mca-bid-timer` (arm skipped after completion; cleanup always queued after the arm it pairs with).
 4. Check the queue-cannot-overflow argument for `mca-bid-completion` (one queue entry per ticket via `timeoutQueued`, at most `capacity` tickets).
 5. Challenge the R3 ownership choice (queued timeout lets a later real response win) against operations expectations.
-6. Run native `mvn -o test` and report the count (expected 36).
+6. Run native `mvn -o test` and report the count (expected 40).
 7. Re-check the scope rule (section 4a): no thread other than the dummy-ack transaction's own threads and the `mca-bid-*` pools may execute its continuation.
+8. Re-run `BidStressTest` with prod options (and with `-Dbid.stress.gcbOptions=httpMethodRestrict=POST&disconnect=true&requestTimeout=300000` for the LOCAL client); challenge the `BidSafeHttpClientChannelHandler` guard against Camel 2.21.1 `ClientChannelHandler` source.
