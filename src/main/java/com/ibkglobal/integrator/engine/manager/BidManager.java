@@ -53,6 +53,15 @@ public class BidManager {
   }
 
   /**
+   * Exchange property set on every exchange that enters the dummy-ack
+   * continuation. The GCB HTTP producer handler uses it to ignore the stale
+   * channel events Camel 2.21.1 would otherwise turn into a second producer
+   * callback for an exchange that is still suspended (see
+   * BidSafeHttpClientChannelHandler).
+   */
+  public static final String BID_CONTINUATION = "MCA_BID_CONTINUATION";
+
+  /**
    * Release outcome, so each caller can keep its own "no BID found" policy.
    */
   public static enum ReleaseResult {
@@ -584,6 +593,9 @@ public class BidManager {
 
   public boolean bidStartAsync(BidInfo incoming, AsyncCallback callback)
       throws Exception {
+    // Set before anything can suspend the exchange; read on the same Netty
+    // event loop by BidSafeHttpClientChannelHandler after this call returns.
+    incoming.getBeforeExchange().setProperty(BID_CONTINUATION, Boolean.TRUE);
     String key = incoming.getName();
     incoming.setAsyncCallback(callback);
     incoming.setAsyncMdc(MDC.getCopyOfContextMap());

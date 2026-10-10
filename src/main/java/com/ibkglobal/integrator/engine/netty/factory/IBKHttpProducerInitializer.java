@@ -8,7 +8,6 @@ import org.apache.camel.component.netty4.ClientInitializerFactory;
 import org.apache.camel.component.netty4.NettyProducer;
 import org.apache.camel.component.netty4.http.NettyHttpConfiguration;
 import org.apache.camel.component.netty4.http.NettyHttpProducer;
-import org.apache.camel.component.netty4.http.handlers.HttpClientChannelHandler;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
@@ -60,7 +59,9 @@ public class IBKHttpProducerInitializer extends ClientInitializerFactory {
             pipeline.addLast("timeout", timeout);
         }
        
-        pipeline.addLast("handler", new HttpClientChannelHandler(producer));
+        // HttpClientChannelHandler plus a guard for BID dummy-ack continuations
+        // (identical behaviour for every other exchange).
+        pipeline.addLast("handler", new BidSafeHttpClientChannelHandler(producer));
 	}
 
 	@Override
