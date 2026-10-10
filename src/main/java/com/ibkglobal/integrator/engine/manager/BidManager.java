@@ -314,7 +314,32 @@ public class BidManager {
       throw new IBKExceptionMCA(ErrorType.MCA_BID, "Bid Result Error : " + e.getMessage(), e);
     } finally {
       // ?? ?? ??(Notify)
-      workNotify(bidInfo);
+      // Office baseline semantics: the releasing thread (Adapter-In executor for a
+      // real response, the single BID JMS consumer for RCV_CONFIRM_BID) only
+      // signals the waiter. An async waiter is resumed on mca-bid-resume, never
+      // here, so the dummy-ack transaction cannot hold the release flow.
+      if (bidInfo.getAsyncCallback() == null) {
+        workNotify(bidInfo);
+      } else {
+        resumeAsync(bidInfo);
+      }
+    }
+  }
+
+  private void resumeAsync(BidInfo info) {
+    long dispatchedNanos = System.nanoTime();
+    try {
+      releaseResume.execute(() -> {
+        long lagMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - dispatchedNanos);
+        lastResumeLagMillis.set(lagMillis);
+        maxResumeLagMillis.accumulateAndGet(lagMillis, Math::max);
+        runIsolated("BID release resume", info.getName(), () -> finishContinuation(info, false));
+      });
+    } catch (java.util.concurrent.RejectedExecutionException rejected) {
+      // Only while stopping (queue >= capacity, one resume per ticket): answer
+      // here rather than lose it; the ticket is already out of bidInfoList.
+      LogManager.getLogger(LogType.ROOT).warn("BID release resume rejected, resuming on releasing thread : " + info.getName());
+      runIsolated("BID release resume", info.getName(), () -> finishContinuation(info, false));
     }
   }
 
@@ -385,8 +410,8 @@ public class BidManager {
   private volatile int completionThreads = DEFAULT_COMPLETION_THREADS;
 
   /**
-   * Workers that run timeout answers (integrator.config.bid-completion-threads,
-   * default 8). A timeout answer starts later than its deadline only while this
+   * Workers that run timeout answers, and separately release resumes
+   * (integrator.config.bid-completion-threads, default 8, each pool). A timeout answer starts later than its deadline only while this
    * many timeout continuations are already running; see maxTimeoutLagMs /
    * lastTimeoutLagMs in the stats line. Startup only.
    */
@@ -408,24 +433,29 @@ public class BidManager {
 
   private void rebuildExecutors() {
     java.util.concurrent.ThreadPoolExecutor previousCompletion = timeoutCompletion;
+    java.util.concurrent.ThreadPoolExecutor previousResume = releaseResume;
     java.util.concurrent.ThreadPoolExecutor previousTimer = timerMaintenance;
-    timeoutCompletion = newCompletionExecutor(completionThreads, asyncCapacityLimit);
+    timeoutCompletion = newElasticExecutor("mca-bid-completion", completionThreads, asyncCapacityLimit);
+    releaseResume = newElasticExecutor("mca-bid-resume", completionThreads, asyncCapacityLimit);
     timerMaintenance = newTimerMaintenance(asyncCapacityLimit);
     previousCompletion.shutdown();
+    previousResume.shutdown();
     previousTimer.shutdown();
   }
 
   /**
-   * Elastic pool (threads start on demand and retire after 60 s idle). The
-   * queue holds one entry per suspended ticket at most (timeoutQueued), and
-   * there are never more than capacity of them, so it cannot overflow outside
-   * shutdown.
+   * Elastic pool (threads start on demand and retire after 60 s idle). Used for
+   * timeout answers (mca-bid-completion, one entry per ticket via timeoutQueued)
+   * and release resumes (mca-bid-resume, one entry per ticket because the release
+   * removes it from bidInfoList). At most capacity tickets exist, so the queue
+   * cannot overflow outside shutdown. Separate pools: slow timeout answers never
+   * delay real responses and vice versa.
    */
-  private java.util.concurrent.ThreadPoolExecutor newCompletionExecutor(int threads, int capacity) {
+  private java.util.concurrent.ThreadPoolExecutor newElasticExecutor(String name, int threads, int capacity) {
     java.util.concurrent.ThreadPoolExecutor executor = new java.util.concurrent.ThreadPoolExecutor(threads, threads,
         60L, java.util.concurrent.TimeUnit.SECONDS,
         new java.util.concurrent.ArrayBlockingQueue<Runnable>(capacity),
-        daemonThreads("mca-bid-completion"), new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+        daemonThreads(name), new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
     executor.allowCoreThreadTimeOut(true);
     return executor;
   }
@@ -443,12 +473,16 @@ public class BidManager {
   private final java.util.concurrent.atomic.AtomicLong fallbackTimeouts = new java.util.concurrent.atomic.AtomicLong();
   private final java.util.concurrent.atomic.AtomicLong lastTimeoutLagMillis = new java.util.concurrent.atomic.AtomicLong();
   private final java.util.concurrent.atomic.AtomicLong maxTimeoutLagMillis = new java.util.concurrent.atomic.AtomicLong();
+  private final java.util.concurrent.atomic.AtomicLong lastResumeLagMillis = new java.util.concurrent.atomic.AtomicLong();
+  private final java.util.concurrent.atomic.AtomicLong maxResumeLagMillis = new java.util.concurrent.atomic.AtomicLong();
   private volatile String lastLoggedCounters = "";
 
   private volatile java.util.concurrent.ThreadPoolExecutor timerMaintenance =
       newTimerMaintenance(DEFAULT_ASYNC_CAPACITY);
   private volatile java.util.concurrent.ThreadPoolExecutor timeoutCompletion =
-      newCompletionExecutor(DEFAULT_COMPLETION_THREADS, DEFAULT_ASYNC_CAPACITY);
+      newElasticExecutor("mca-bid-completion", DEFAULT_COMPLETION_THREADS, DEFAULT_ASYNC_CAPACITY);
+  private volatile java.util.concurrent.ThreadPoolExecutor releaseResume =
+      newElasticExecutor("mca-bid-resume", DEFAULT_COMPLETION_THREADS, DEFAULT_ASYNC_CAPACITY);
 
   /** Continuations currently suspended (holding a capacity permit). */
   public int getAsyncPendingCount() {
@@ -475,7 +509,17 @@ public class BidManager {
         + ", notAccepted=" + asyncNotAccepted.get() + ", duplicate=" + asyncDuplicate.get()
         + ", timerTasksDropped=" + timerTasksDropped.get() + ", releaseNotFound=" + releaseNotFound.get()
         + ", primaryTimeouts=" + primaryTimeouts.get() + ", fallbackTimeouts=" + fallbackTimeouts.get()
-        + ", maxTimeoutLagMs=" + maxTimeoutLagMillis.get();
+        + ", maxTimeoutLagMs=" + maxTimeoutLagMillis.get() + ", maxResumeLagMs=" + maxResumeLagMillis.get();
+  }
+
+  /** Release resumes queued but not yet started (resume workers busy). */
+  public int getResumeQueueDepth() {
+    return releaseResume.getQueue().size();
+  }
+
+  /** Worst observed delay (ms) between a release and the start of the waiting transaction's continuation. */
+  public long getMaxResumeLagMillis() {
+    return maxResumeLagMillis.get();
   }
 
   /** Timeout answers queued but not yet started (completion workers busy). */
@@ -494,7 +538,10 @@ public class BidManager {
         + ", oldestPendingMs=" + getOldestAsyncPendingMillis() + ", " + asyncCounters()
         + ", lastTimeoutLagMs=" + lastTimeoutLagMillis.get()
         + ", completionQueue=" + getCompletionQueueDepth()
-        + ", completionActive=" + timeoutCompletion.getActiveCount() + "/" + completionThreads;
+        + ", completionActive=" + timeoutCompletion.getActiveCount() + "/" + completionThreads
+        + ", lastResumeLagMs=" + lastResumeLagMillis.get()
+        + ", resumeQueue=" + getResumeQueueDepth()
+        + ", resumeActive=" + releaseResume.getActiveCount() + "/" + completionThreads;
   }
 
   /**
@@ -727,6 +774,14 @@ public class BidManager {
 
   static final int SHUTDOWN_DRAIN_THREADS = 4;
 
+  private static void awaitUntil(java.util.concurrent.ExecutorService executor, long deadlineNanos)
+      throws InterruptedException {
+    long remaining = deadlineNanos - System.nanoTime();
+    if (remaining > 0) {
+      executor.awaitTermination(remaining, java.util.concurrent.TimeUnit.NANOSECONDS);
+    }
+  }
+
   /** Upper bound (ms) that shutdownAsync waits for suspended continuations to be answered. */
   long shutdownDrainMillis = 10000L;
 
@@ -741,6 +796,7 @@ public class BidManager {
       asyncStopping = true;
     }
     java.util.concurrent.ExecutorService drain = null;
+    long drainDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(shutdownDrainMillis);
     try {
       deadlineWatchdog.shutdown();
       java.util.List<BidInfo> pending = new java.util.ArrayList<>();
@@ -757,10 +813,16 @@ public class BidManager {
               () -> expireTicket(info.getName(), info)));
         }
         drain.shutdown();
-        if (!drain.awaitTermination(shutdownDrainMillis, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-          LogManager.getLogger(LogType.ROOT).warn("BID shutdown drain exceeded " + shutdownDrainMillis
-              + " ms, continuations still pending : " + getAsyncPendingCount());
-        }
+        awaitUntil(drain, drainDeadline);
+      }
+      // Releases and timeouts already handed over keep running until the same deadline.
+      releaseResume.shutdown();
+      timeoutCompletion.shutdown();
+      awaitUntil(releaseResume, drainDeadline);
+      awaitUntil(timeoutCompletion, drainDeadline);
+      if (getAsyncPendingCount() > 0) {
+        LogManager.getLogger(LogType.ROOT).warn("BID shutdown drain exceeded " + shutdownDrainMillis
+            + " ms, continuations still pending : " + getAsyncPendingCount());
       }
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
@@ -768,7 +830,8 @@ public class BidManager {
       if (drain != null) {
         drain.shutdownNow();
       }
-      timeoutCompletion.shutdown();
+      releaseResume.shutdownNow();
+      timeoutCompletion.shutdownNow();
       timerMaintenance.shutdown();
     }
   }

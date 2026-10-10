@@ -95,7 +95,7 @@ public class BidPrimaryTimerTest {
             // 2. Release while the lock is stuck: answered immediately.
             assertEquals(BidManager.ReleaseResult.DELIVERED,
                 manager.bidResult("lock-release", new DefaultExchange(context)));
-            assertEquals(1, releasedCalls.get());
+            assertTrue(BidTestSupport.waitUntil(() -> releasedCalls.get() == 1, 1000));
 
             // 3. Fallback deadline while the lock is stuck: answered, permit returned.
             await(expiredCalls, 1, 2000);

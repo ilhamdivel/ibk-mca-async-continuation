@@ -55,6 +55,7 @@ public class BidFaultTest {
             assertEquals(512, manager.getBidInfoList().size());
             assertFalse(manager.getBidInfoList().containsKey("overflow"));
             manager.bidResult("capacity-0", new DefaultExchange(context));
+            assertTrue(BidTestSupport.waitUntil(() -> manager.getAsyncPendingCount() == 511, 3000));
             assertFalse(manager.bidStartAsync(ticket("replacement", context), sync -> calls.incrementAndGet()));
         } finally { manager.shutdownAsync(); }
         assertEquals(513, calls.get());
@@ -99,26 +100,29 @@ public class BidFaultTest {
         } finally { manager.shutdownAsync(); }
     }
 
-    @Test public void callbackFailureRestoresMdcAndDoesNotLeakCapacity() throws Exception {
+    @Test public void continuationFailureStaysOffTheReleasingThreadAndDoesNotLeakCapacity() throws Exception {
+        // Office baseline semantics: the release only signals the waiter. A failure in the waiting
+        // transaction's continuation is that transaction's problem (logged on mca-bid-resume); it must
+        // not be thrown into the release request (real response / RCV_CONFIRM_BID).
         BidManager manager = manager();
         DefaultCamelContext context = new DefaultCamelContext();
         MDC.put("correlation", "request");
         BidInfo ticket = ticket("throwing", context);
+        java.util.concurrent.atomic.AtomicReference<String> seenMdc = new java.util.concurrent.atomic.AtomicReference<>();
         manager.bidStartAsync(ticket, sync -> {
-            assertEquals("request", MDC.get("correlation"));
+            seenMdc.set(MDC.get("correlation"));
             throw new IllegalStateException("Injected callback failure");
         });
         MDC.put("correlation", "release-thread");
         try {
-            manager.bidResult("throwing", new DefaultExchange(context));
-            fail("Injected failure must remain visible");
-        } catch (IllegalStateException expected) {
-            assertEquals("Injected callback failure", expected.getMessage());
-        } finally {
+            assertEquals(BidManager.ReleaseResult.DELIVERED, manager.bidResult("throwing", new DefaultExchange(context)));
             assertEquals("release-thread", MDC.get("correlation"));
+            assertTrue(BidTestSupport.waitUntil(
+                () -> ticket.getContinuationCompleted().get() && manager.getAsyncPendingCount() == 0, 3000));
+            assertEquals("continuation runs with the request's MDC", "request", seenMdc.get());
+        } finally {
             MDC.clear(); manager.shutdownAsync();
         }
-        assertTrue(ticket.getContinuationCompleted().get());
         assertFalse(ticket.isAsyncPermitOwned());
         assertTrue(ticket.getFallbackDeadline().isCancelled());
         assertTrue(manager.getBidInfoList().isEmpty());

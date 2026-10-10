@@ -99,7 +99,8 @@ public class BidCompletionTest {
             Exchange response = new DefaultExchange(context);
             response.getIn().setBody("real-response");
             assertEquals(BidManager.ReleaseResult.DELIVERED, manager.bidResult("queued-release", response));
-            assertEquals(1, releasedCalls.get());
+            // Resumed on mca-bid-resume, a separate pool: saturated timeout workers do not delay it.
+            assertTrue(BidTestSupport.waitUntil(() -> releasedCalls.get() == 1, 1000));
             assertEquals("real-response", released.getBeforeExchange().getIn().getBody());
 
             slow.countDown();

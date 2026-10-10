@@ -57,6 +57,7 @@ public class BidAsyncTest {
             Exchange release = new DefaultExchange(context);
             release.getIn().setBody("final");
             manager.bidResult("route-key", release);
+            assertTrue(BidTestSupport.waitUntil(() -> completions.get() == 1, 3000));   // resumed on mca-bid-resume
             assertEquals(1, downstream.get());
             assertEquals(1, completions.get());
             assertEquals("final", original.getIn().getBody());
@@ -108,6 +109,7 @@ public class BidAsyncTest {
             Exchange exchange = new DefaultExchange(context);
             org.apache.camel.util.AsyncProcessorConverterHelper.convert(producer)
                 .process(exchange, sync -> completions.incrementAndGet());
+            assertTrue(BidTestSupport.waitUntil(() -> completions.get() == 1, 3000));
             assertEquals(1, downstream.get());
             assertEquals(1, completions.get());
             assertNull(exchange.getException());
@@ -216,7 +218,7 @@ public class BidAsyncTest {
         assertEquals(0, calls.get());
         assertSame(ticket, manager.getBidInfoList().get("closed"));
         assertEquals(BidManager.ReleaseResult.DELIVERED, manager.bidResult("closed", new DefaultExchange(context)));
-        assertEquals(1, calls.get());
+        assertTrue(BidTestSupport.waitUntil(() -> calls.get() == 1, 3000));
         assertEquals(BidStatus.COMPLETE, ticket.getStatus());
         manager.shutdownAsync();
     }
@@ -239,7 +241,7 @@ public class BidAsyncTest {
         assertSame(current, manager.getBidInfoList().get("reused"));
         assertEquals(0, calls.get());
         manager.bidResult("reused", new DefaultExchange(context));
-        assertEquals(1, calls.get());
+        assertTrue(BidTestSupport.waitUntil(() -> calls.get() == 1, 3000));
         manager.shutdownAsync();
     }
 
@@ -259,8 +261,8 @@ public class BidAsyncTest {
         Exchange release = new DefaultExchange(context);
         release.getIn().setBody("final");
         assertEquals(BidManager.ReleaseResult.DELIVERED, manager.bidResult("key", release));
-        assertEquals("final", original.getIn().getBody());
-        assertEquals(1, calls.get());
+        assertEquals("final", original.getIn().getBody());   // body handed over by the releasing thread
+        assertTrue(BidTestSupport.waitUntil(() -> calls.get() == 1, 3000));
         assertEquals(BidManager.ReleaseResult.NOT_FOUND, manager.bidResult("key", release));
         assertEquals(1, calls.get());
         manager.shutdownAsync();
