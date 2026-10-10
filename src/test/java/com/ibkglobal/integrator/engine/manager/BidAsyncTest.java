@@ -69,13 +69,11 @@ public class BidAsyncTest {
 
     @Test
     public void releaseDuringRegistrationInRealCamelPipeline() throws Exception {
-        // The release lands while bidStartAsync is still arming its timers, i.e. callback.done(false)
-        // runs BEFORE process() has returned false. Camel 2.21.1 must still route downstream once.
+        // The release completes the continuation BEFORE process() has returned false, i.e.
+        // callback.done(false) runs first. Camel 2.21.1 must still route downstream exactly once.
         BidManager manager = new BidManager();
         manager.ibkTimeoutBid = mock(IBKTimeout.class);
         DefaultCamelContext context = new DefaultCamelContext();
-        doAnswer(invocation -> { manager.bidResult("race", new DefaultExchange(context)); return null; })
-            .when(manager.ibkTimeoutBid).put(anyString(), any(BidInfo.class), anyLong());
         AtomicInteger downstream = new AtomicInteger();
         org.apache.camel.AsyncProcessor suspend = new org.apache.camel.AsyncProcessor() {
             public void process(Exchange exchange) throws Exception {
@@ -86,7 +84,10 @@ public class BidAsyncTest {
                 ticket.setName("race");
                 ticket.setBeforeExchange(exchange);
                 try {
-                    return manager.bidStartAsync(ticket, callback);
+                    boolean sync = manager.bidStartAsync(ticket, callback);
+                    assertFalse(sync);
+                    manager.bidResult("race", new DefaultExchange(context));   // done(false) before return
+                    return sync;
                 } catch (Exception failure) {
                     exchange.setException(failure);
                     callback.done(true);

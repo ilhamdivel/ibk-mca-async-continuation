@@ -348,6 +348,9 @@ public class BidManager {
     }
     asyncCapacityLimit = capacity;
     asyncCapacity = new java.util.concurrent.Semaphore(capacity);
+    java.util.concurrent.ThreadPoolExecutor previousTimer = timerMaintenance;
+    timerMaintenance = newTimerMaintenance(capacity);
+    previousTimer.shutdown();
   }
 
   public int getAsyncCapacityLimit() {
@@ -361,7 +364,11 @@ public class BidManager {
   private final java.util.concurrent.atomic.AtomicLong asyncTimedOut = new java.util.concurrent.atomic.AtomicLong();
   private final java.util.concurrent.atomic.AtomicLong asyncNotAccepted = new java.util.concurrent.atomic.AtomicLong();
   private final java.util.concurrent.atomic.AtomicLong asyncDuplicate = new java.util.concurrent.atomic.AtomicLong();
+  private final java.util.concurrent.atomic.AtomicLong timerTasksDropped = new java.util.concurrent.atomic.AtomicLong();
   private volatile String lastLoggedCounters = "";
+
+  private volatile java.util.concurrent.ThreadPoolExecutor timerMaintenance =
+      newTimerMaintenance(DEFAULT_ASYNC_CAPACITY);
 
   /** Continuations currently suspended (holding a capacity permit). */
   public int getAsyncPendingCount() {
@@ -385,7 +392,8 @@ public class BidManager {
   private String asyncCounters() {
     return "suspended=" + asyncSuspended.get() + ", delivered=" + asyncDelivered.get()
         + ", earlyRelease=" + asyncEarlyRelease.get() + ", timedOut=" + asyncTimedOut.get()
-        + ", notAccepted=" + asyncNotAccepted.get() + ", duplicate=" + asyncDuplicate.get();
+        + ", notAccepted=" + asyncNotAccepted.get() + ", duplicate=" + asyncDuplicate.get()
+        + ", timerTasksDropped=" + timerTasksDropped.get();
   }
 
   /** One-line snapshot for logs / admin endpoints. */
@@ -509,15 +517,21 @@ public class BidManager {
       return false;
     }
     asyncSuspended.incrementAndGet();
-    incoming.setAsyncTimerKey(key + ":async:" + java.util.UUID.randomUUID().toString());
-    try {
-      ibkTimeoutBid.put(incoming.getAsyncTimerKey(), incoming, incoming.getDefaultTimeOut());
+    String timerKey = key + ":async:" + java.util.UUID.randomUUID().toString();
+    incoming.setAsyncTimerKey(timerKey);
+    // Arm the primary IBKTimeout off this (Netty IO) thread. Runs on the FIFO
+    // timer thread, so a cleanup enqueued by a completion always runs after it;
+    // skipped when the ticket already completed.
+    submitTimerTask("Primary BID timer arm", key, () -> {
       if (incoming.getContinuationCompleted().get()) {
-        ibkTimeoutBid.remove(incoming.getAsyncTimerKey());
+        return;
       }
-    } catch (Exception failure) {
-      LogManager.getLogger(LogType.ROOT).warn("Primary BID timer unavailable; fallback deadline armed: " + key);
-    }
+      try {
+        ibkTimeoutBid.put(timerKey, incoming, incoming.getDefaultTimeOut());
+      } catch (Exception failure) {
+        LogManager.getLogger(LogType.ROOT).warn("Primary BID timer unavailable; fallback deadline armed: " + key);
+      }
+    });
     // Inbound channel close deliberately does NOT end the ticket (office
     // baseline semantics): it keeps waiting for the release or the deadline, so
     // a release arriving after the client disconnected is still DELIVERED
@@ -550,13 +564,7 @@ public class BidManager {
       return;
     }
     Map<String, String> previous = org.slf4j.MDC.getCopyOfContextMap();
-    if (info.getAsyncTimerKey() != null) {
-      try {
-        ibkTimeoutBid.remove(info.getAsyncTimerKey());
-      } catch (RuntimeException failure) {
-        LogManager.getLogger(LogType.ROOT).warn("BID timer cleanup failed: " + info.getName(), failure);
-      }
-    }
+    // Non-blocking: ScheduledFuture.cancel only touches the watchdog queue.
     if (info.getFallbackDeadline() != null) {
       info.getFallbackDeadline().cancel(false);
     }
@@ -577,7 +585,34 @@ public class BidManager {
       } else {
         org.slf4j.MDC.setContextMap(previous);
       }
+      // Primary IBKTimeout cleanup takes the DefaultTimeoutMap lock (also held
+      // by its purge). It is best effort and must never gate the response or
+      // the permit, so it is queued AFTER both, on the timer thread.
+      String timerKey = info.getAsyncTimerKey();
+      if (timerKey != null) {
+        submitTimerTask("Primary BID timer cleanup", info.getName(), () -> ibkTimeoutBid.remove(timerKey));
+      }
     }
+  }
+
+  /**
+   * One FIFO thread for every primary IBKTimeout put/remove of async tickets.
+   * Bounded queue; when full (only if the timer lock is stuck for a long time)
+   * the task is dropped and counted: a dropped arm leaves the fallback deadline
+   * in charge, a dropped cleanup lets the entry expire on its own (bidTimeout
+   * ignores completed tickets).
+   */
+  private java.util.concurrent.ThreadPoolExecutor newTimerMaintenance(int capacity) {
+    java.util.concurrent.ThreadPoolExecutor executor = new java.util.concurrent.ThreadPoolExecutor(1, 1,
+        60L, java.util.concurrent.TimeUnit.SECONDS,
+        new java.util.concurrent.ArrayBlockingQueue<Runnable>(Math.max(64, capacity * 4)),
+        daemonThreads("mca-bid-timer"), (task, pool) -> timerTasksDropped.incrementAndGet());
+    executor.allowCoreThreadTimeOut(true);
+    return executor;
+  }
+
+  private void submitTimerTask(String what, String key, Runnable task) {
+    timerMaintenance.execute(() -> runIsolated(what, key, task));
   }
 
   /**
@@ -648,6 +683,7 @@ public class BidManager {
         drain.shutdownNow();
       }
       timeoutCompletion.shutdown();
+      timerMaintenance.shutdown();
     }
   }
 }

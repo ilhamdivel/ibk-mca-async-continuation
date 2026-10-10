@@ -135,8 +135,11 @@ public class BidFaultTest {
         BidInfo ticket = ticket("install-race", context);
         try {
             assertFalse(manager.bidStartAsync(ticket, sync -> calls.incrementAndGet()));
+            // The primary timer is armed on the mca-bid-timer thread; the release fires from there.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (calls.get() == 0 && System.nanoTime() < deadline) Thread.sleep(5);
             assertEquals(1, calls.get());
-            verify(manager.ibkTimeoutBid, atLeastOnce()).remove(ticket.getAsyncTimerKey());
+            verify(manager.ibkTimeoutBid, timeout(3000).atLeastOnce()).remove(ticket.getAsyncTimerKey());
             assertTrue(ticket.getFallbackDeadline().isCancelled());
             assertTrue(manager.getBidInfoList().isEmpty());
         } finally { manager.shutdownAsync(); }
