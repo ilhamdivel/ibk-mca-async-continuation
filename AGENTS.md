@@ -5,7 +5,7 @@ Private Java 8 / Camel 2.21.1 office-source baseline and isolated BID continuati
 
 ## Commands
 - Build: `mvn test` (requires internal dependencies).
-- Offline verification: `mvn -o test` (needs the Surefire JUnit4 provider 2.18.1 cached), or JUnitCore over every `*Test` class in `src/test/java/com/ibkglobal/integrator/engine/manager` (expected 34). Without internal artifacts see `docs/AUDIT_REPORT_BID_CONTINUATION.md` section 10.
+- Offline verification: `mvn -o test` (needs the Surefire JUnit4 provider 2.18.1 cached), or JUnitCore over every `*Test` class in `src/test/java/com/ibkglobal/integrator/engine/manager` (expected 36). Without internal artifacts see `docs/AUDIT_REPORT_BID_CONTINUATION.md` section 10.
 
 ## Conventions
 Preserve existing route order and CRLF Java endings. New code and documentation use English.
@@ -15,6 +15,7 @@ callback.done(false);
 
 ## Boundaries
 **NEVER** deploy automatically, modify business routing, commit credentials, `.svn`, `target`, logs, or binaries. **ALWAYS** test normal responses and BID races.
+**SCOPE RULE:** the async change may only stop the dummy ack from holding other transactions. Normal, local, ITRO00000035, type-5, type-6 (RCV_CONFIRM_BID), real-response, approval and error flows keep office behaviour; a releasing thread only signals and never runs the waiting transaction's continuation (see `docs/REAUDIT_RESPONSE.md` section 4a).
 
 ## Dependencies
 Java 8, Camel 2.21.1, Spring Boot 1.5.10; exact dependencies remain in `pom.xml`.

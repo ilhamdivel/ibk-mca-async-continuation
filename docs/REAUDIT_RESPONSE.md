@@ -5,7 +5,7 @@
 | Date | 2026-10-10 |
 | Re-audit input | [`REAUDIT_REPORT_GPT_ec28074.md`](REAUDIT_REPORT_GPT_ec28074.md) (verbatim copy of the report received) |
 | Revision re-audited | `ec28074` (branch `audit-fixes`) |
-| Response commits | `b7f346d` (R1), `11608eb` (R2), `3dc1cc8` (R3), `94ea233` (bridge HTTP regression), this documentation commit |
+| Response commits | `b7f346d` (R1), `11608eb` (R2), `3dc1cc8` (R3), `94ea233` (bridge HTTP regression), `819bdb9` (docs), `dbef4c3` (scope rule: releasing threads only signal), this documentation commit |
 | Responder | Claude Opus 5.5 (Claude Code), on behalf of IBK Global IT Operation |
 | Historical report | [`AUDIT_REPORT_BID_CONTINUATION.md`](AUDIT_REPORT_BID_CONTINUATION.md) describes the state at `ec28074` and is kept unchanged as history. **This document is the current state.** |
 
@@ -15,7 +15,8 @@
 - R1, R2 and R3 are fixed with regression tests. The same probes now pass on the new HEAD (section 3).
 - The R3 completion latency now has an explicit, tested and measured bound. It is not just a bigger pool (section 4).
 - The bridge-topology starvation (known scope, phase 2) is now reproducible through real HTTP from the committed tests.
-- The two pre-existing type-5 BID defects are **confirmed but not changed**. They alter business routing of terminal BIDs, which `AGENTS.md` forbids without a business decision (section 6).
+- The two pre-existing type-5 BID defects are **confirmed but not changed**. They alter business routing of terminal BIDs, which `AGENTS.md` forbids without a business decision (section 6). IBK confirmed: leave them.
+- **Scope rule (IBK, 2026-10-10):** the async change may only stop the dummy ack from holding other transactions; no other flow may change. Checking that rule found one more deviation: the releasing thread (real response, RCV_CONFIRM_BID on the single JMS consumer) ran the waiting transaction's continuation. Fixed in `dbef4c3`; compliance matrix in section 4a.
 - Status: still **not production-approved**. The office acceptance criteria 2–9 of the re-audit and phase 2 remain open (section 9).
 
 ## 2. Claim-by-claim verdict
@@ -88,6 +89,45 @@ The R3 probe uses two slow callbacks. With the new default of 8 workers it no lo
   - thread count is validated and startup-only.
 - Spring wiring: `BidCapacityConfigTest`.
 
+### 4a. Scope rule: releasing threads only signal (`dbef4c3`)
+
+**Rule:** the change exists only so that a dummy ack does not hold other transactions. Normal, local, ITRO00000035, type-5 terminal BID, type-6 RCV_CONFIRM_BID, real-response, approval and error flows must keep their office behaviour.
+
+**Deviation found.** Before `dbef4c3`, `bidResult` ran the waiting transaction's continuation **inline** on the releasing thread. That thread is either the Adapter-In executor handling GCB's real response (`ProcessPreMCA.java:100`) or the single BID JMS consumer handling RCV_CONFIRM_BID (`MCABidHandle.java:158`). The release request therefore waited for another transaction's post-processing, could receive its exception, and (if that continuation blocked) was blocked with it. The office baseline only called `CompletableFuture.complete()` and returned.
+
+**Fix.** `complete()` still hands the response body over and sets `COMPLETE` on the releasing thread, exactly as the baseline did. For an async waiter it then queues the continuation on a separate elastic pool `mca-bid-resume` and returns. Details:
+- The pool is separate from `mca-bid-completion`, so slow timeout answers cannot delay real responses and vice versa.
+- Its queue equals the capacity: one resume per ticket, because the release removes the ticket from the map.
+- On rejection (only while stopping) the continuation is resumed inline rather than lost.
+- New metrics: `lastResumeLagMs` / `maxResumeLagMs`, `resumeQueue`, `resumeActive`.
+
+**Proof.** `BidReleaseIsolationTest` fails on `819bdb9` with `TimeoutException` in both tests and passes on `dbef4c3`:
+- the releasing thread must return within 1 s while the continuation is blocked and failing;
+- the real `MCABidHandle` handling RCV_CONFIRM_BID on a "JMS consumer" thread must return within 1 s.
+
+The earlier probe of the old code deadlocked instead of failing.
+
+**Compliance matrix (against `office-baseline`):**
+
+| Flow | Entry | Office behaviour kept? | Evidence |
+|---|---|---|---|
+| Normal response (otptTmgtDcd ≠ 4) | `MCAInbound` → `MCAWorkAfterAsync` | Yes: synchronous `done(true)`, no timer/map access, same field reads as `MCAWorkAfterProcess` | `normalResponseRemainsSynchronous` |
+| Local (`sysEnvrInfoDcd = L`) | same | Yes, same as normal | code path identical |
+| ITRO00000035 BID HTTP | `MCAWorkPreProcess.bidHttp` | Yes: returns before pre-registration and before the after-processor (fault) | unchanged code |
+| Type-5 terminal BID | SEDA → JMS → `MCABidProcess` → `MCABidHandle.bidWork` | Yes, untouched (pre-existing defects left as is) | unchanged code |
+| Type-6 RCV_CONFIRM_BID | `MCABidHandle.bidWorkWait` → `bidResult` | Yes since `dbef4c3`: the consumer only signals | `rcvConfirmBidOnTheSingleJmsConsumerIsNotHeldByTheWaitingTransaction` |
+| Real response (0/R/K) | `ProcessPreMCA` → `bidResult` → `ROUTE_STOP` | Yes since `dbef4c3`: same return value, same `NOT_FOUND` → "bidInfo is null", only signals | `releasingThreadOnlySignalsEvenWhileTheContinuationIsBlocked` |
+| Release before dummy ack | `bidResult` → PARKED; dummy completes it | Yes: the dummy-ack thread completes its own transaction synchronously | `releaseFirstCompletesSynchronously` |
+| Approval / error paths | `onException` → `ErrorCatchMCA` | Yes: error codes unchanged; overload answered as the existing BID timeout | `BidFaultTest` |
+| **Dummy ack (in scope)** | `MCAWorkAfterAsync` → `bidStartAsync` | **Changed by design**: the GCB reply IO worker is no longer parked | `BidTopologyTest` |
+
+Additive only (no flow change):
+- an exchange property `MCA_BID_OWNER` on BID-key requests;
+- the log lines `Bid Timeout`, `BID continuation not accepted`, and the 60 s stats line;
+- daemon threads `mca-bid-*`.
+
+Known limitation, unchanged (phase 2): with the deployed `MCAGcbComBean` bridge the Adapter-In thread of the waiting transaction itself stays parked.
+
 ### Bridge topology through real HTTP (`94ea233`)
 
 `BidTopologyTest.prodBridgeStarvesAnHttpReleasePinnedToTheParkedExecutor` uses one Adapter-In executor and the real `MCAGcbComBean`:
@@ -103,10 +143,11 @@ This reproduces the first audit's pool-size-one experiment from committed code.
 |---|---|---|---|
 | `mca-bid-deadline` | 1 | fallback deadline checks (every 100 ms after a ticket's deadline), 60 s stats line | run continuations or take the timer lock |
 | `mca-bid-completion` | 0..`completionThreads` (default 8) | timeout answers (continuation) | — |
+| `mca-bid-resume` | 0..`completionThreads` (default 8) | continuation after a release (real response / RCV_CONFIRM_BID) | run on the releasing thread |
 | `mca-bid-timer` | 0..1 | primary `IBKTimeout` put/remove | gate an answer or a permit |
 | `mca-bid-shutdown` | ≤ 4, shutdown only | drain | hold the caller beyond `shutdownDrainMillis` |
 
-Release answers run on the thread that delivers the release (Adapter-In executor or BID JMS consumer), as before.
+The thread that delivers a release (Adapter-In executor or BID JMS consumer) only signals, as in the office baseline; the waiting transaction continues on `mca-bid-resume`.
 
 ## 6. Pre-existing type-5 BID defects (confirmed, not changed)
 
@@ -148,14 +189,15 @@ Stats line (every 60 s on `mca-bid-deadline`, only when something is pending or 
 ```
 Bid async stats : pending=x/cap, oldestPendingMs=.., suspended=.., delivered=.., earlyRelease=.., timedOut=..,
 notAccepted=.., duplicate=.., timerTasksDropped=.., releaseNotFound=.., primaryTimeouts=.., fallbackTimeouts=..,
-maxTimeoutLagMs=.., lastTimeoutLagMs=.., completionQueue=.., completionActive=x/threads
+maxTimeoutLagMs=.., maxResumeLagMs=.., lastTimeoutLagMs=.., completionQueue=.., completionActive=x/threads,
+lastResumeLagMs=.., resumeQueue=.., resumeActive=x/threads
 ```
 
 `delivered` counts the release that won the ticket, not confirmed client receipt (N6 is the closest log evidence; byte-level receipt needs the office test).
 
 ## 8. Verification
 
-Test inventory: **34 tests in 8 classes**, all passing (harness runs listed below).
+Test inventory: **36 tests in 9 classes**, all passing (harness runs listed below).
 
 | Class | Tests |
 |---|---|
@@ -166,6 +208,7 @@ Test inventory: **34 tests in 8 classes**, all passing (harness runs listed belo
 | `BidObservabilityTest` | 4 (log lines, counters, arm failure) |
 | `BidCapacityConfigTest` | 3 (Spring `@Value` for both properties) |
 | `BidTopologyTest` | 3 (real `MCAGcbComBean` bridge incl. HTTP starvation, direct wiring) |
+| `BidReleaseIsolationTest` | 2 (scope rule: releasing thread and real `MCABidHandle` RCV_CONFIRM_BID only signal) |
 | `BidNettyTest` | 1 |
 
 Commands:
@@ -178,10 +221,11 @@ java -cp "target/classes:target/test-classes:<test classpath>" org.junit.runner.
   com.ibkglobal.integrator.engine.manager.BidAsyncTest com.ibkglobal.integrator.engine.manager.BidFaultTest \
   com.ibkglobal.integrator.engine.manager.BidCompletionTest com.ibkglobal.integrator.engine.manager.BidPrimaryTimerTest \
   com.ibkglobal.integrator.engine.manager.BidObservabilityTest com.ibkglobal.integrator.engine.manager.BidCapacityConfigTest \
-  com.ibkglobal.integrator.engine.manager.BidTopologyTest com.ibkglobal.integrator.engine.manager.BidNettyTest
+  com.ibkglobal.integrator.engine.manager.BidTopologyTest com.ibkglobal.integrator.engine.manager.BidNettyTest \
+  com.ibkglobal.integrator.engine.manager.BidReleaseIsolationTest
 ```
 
-Responder's environment: the offline harness from `AUDIT_REPORT_BID_CONTINUATION.md` section 10 (JDK 8, real Camel 2.21.1 / Netty 4.1.22, Spring 5.3 / Mockito 4 substitutes, three stubbed internal types). Each commit passed 3 consecutive runs before it was made; the final tree passed **10 of 10 consecutive runs, `OK (34 tests)`** each.
+Responder's environment: the offline harness from `AUDIT_REPORT_BID_CONTINUATION.md` section 10 (JDK 8, real Camel 2.21.1 / Netty 4.1.22, Spring 5.3 / Mockito 4 substitutes, three stubbed internal types). Each commit passed 3 consecutive runs before it was made; `819bdb9` passed 10 of 10 consecutive runs (`OK (34 tests)`), and `dbef4c3` passed **10 of 10 consecutive runs, `OK (36 tests)`** each.
 
 The re-audit's native run (Spring 4.3.14, Mockito 1.10.19, cached `ibkglobal-message`) was on `ec28074`. **A native `mvn -o test` on this HEAD is still required.** All new tests use Mockito 1.10-compatible APIs only (`timeout()`, `doAnswer`, `RETURNS_DEEP_STUBS`, `verifyZeroInteractions`).
 
@@ -206,4 +250,5 @@ The re-audit's native run (Spring 4.3.14, Mockito 1.10.19, cached `ibkglobal-mes
 3. Check the FIFO argument for arm/cleanup on `mca-bid-timer` (arm skipped after completion; cleanup always queued after the arm it pairs with).
 4. Check the queue-cannot-overflow argument for `mca-bid-completion` (one queue entry per ticket via `timeoutQueued`, at most `capacity` tickets).
 5. Challenge the R3 ownership choice (queued timeout lets a later real response win) against operations expectations.
-6. Run native `mvn -o test` and report the count (expected 34).
+6. Run native `mvn -o test` and report the count (expected 36).
+7. Re-check the scope rule (section 4a): no thread other than the dummy-ack transaction's own threads and the `mca-bid-*` pools may execute its continuation.
